@@ -1,0 +1,33 @@
+name: Build release artifacts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install packaging compiler
+        shell: pwsh
+        run: choco install innosetup --version=6.7.3 --yes --no-progress
+      - name: Build installer and matching source
+        shell: pwsh
+        run: ./tools/Build-Release.ps1 -VendorDependencies
+      - name: Inspect Windows executable
+        shell: pwsh
+        run: ./tools/Inspect-Artifact.ps1
+      - name: Test installer on disposable hosted runner
+        shell: pwsh
+        run: ./tools/Test-Installer.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Orbit-windows-x64
+          path: |
+            dist/OrbitSetup-*-x64.exe
+            dist/Orbit-*-source.zip
+            dist/SHA256SUMS.txt
+            dist/THIRD-PARTY-NOTICES.txt
+            dist/update-unsigned.json
+          if-no-files-found: error

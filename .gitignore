@@ -1,0 +1,7 @@
+/target
+/.tools
+/dist
+*.key
+/task_plan.md
+/progress.md
+/findings.md
