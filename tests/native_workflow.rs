@@ -59,7 +59,12 @@ fn key_event(key: VIRTUAL_KEY, up: bool) {
 
 #[track_caller]
 fn wait_for(mut condition: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(4);
+    wait_for_timeout(Duration::from_secs(4), &mut condition);
+}
+
+#[track_caller]
+fn wait_for_timeout(timeout: Duration, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
     loop {
         let mut message = MSG::default();
         while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
@@ -122,7 +127,10 @@ fn capture(name: &str, window: Option<HWND>) {
         ]);
     }
     let mut process = command.spawn().unwrap();
-    wait_for(|| process.try_wait().unwrap().is_some());
+    // Cold PowerShell/.NET startup on hosted runners can take over four seconds.
+    wait_for_timeout(Duration::from_secs(15), || {
+        process.try_wait().unwrap().is_some()
+    });
     assert!(process.wait().unwrap().success());
 }
 
