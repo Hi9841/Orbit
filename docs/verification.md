@@ -2,11 +2,16 @@
 
 ## Current development build
 
-On 2026-09-28, `cargo test --locked --all-targets` passed 32 tests, with three desktop tests explicitly ignored. Formatting and Clippy with warnings denied passed. The radial bitmap was inspected offscreen at 96 and 144 DPI. PE inspection confirmed an x64 Windows GUI executable without a Visual C++ redistributable import.
+On 2026-09-28, local `cargo test --locked --all-targets` passed 46 tests, with 3 desktop tests ignored. `cargo fmt --all` and `cargo clippy --locked --all-targets -- -D warnings` passed. Offscreen radial and preview bitmaps were rendered without opening a window. Preview opacity remains a raw 0-255 alpha byte.
 
-Hosted verification of baseline commit `181de83` passed in [run 36415646672](https://github.com/Hi9841/Orbit/actions/runs/36415646672). It built the installer and corresponding source, inspected the PE, installed, launched, quit, reinstalled, updated a running copy, verified restart, and uninstalled with settings retained and deleted. The native tests also passed real placement, history, radial preview, cancellation, commit, undo, settings opening, and quit.
+Commit `2ea7203` was checked on a GitHub-hosted Windows Server 2025 runner:
 
-These results cover the baseline commit. Expanded 0.2.0 options require another run against their final commit. No Windows 10/11 clean-machine, screen-reader, mixed-DPI interaction, or published version-upgrade acceptance result is claimed.
+- [Check Windows build 36455383244](https://github.com/Hi9841/Orbit/actions/runs/36455383244) passed formatting, locked tests, Clippy, and the release build.
+- [Package run 36455396233](https://github.com/Hi9841/Orbit/actions/runs/36455396233) passed installer compilation, vendored source inspection, PE inspection, install, launch, quit, reinstall, running-app update handoff, preference preservation, uninstall with preferences kept and explicitly removed, native placement and history, shortcut cycling, radial preview, cancel, commit, animated placement, undo, stash and unstash, recovery after killing the resident, all eight settings pages, and saving preferences.
+- The same native run held the middle button with an 80 ms trigger delay, selected a sector, released, placed the window, and undid that placement.
+- Settings captures from that run show literal ampersands in "General & behavior" and "About & updates", the labels "Trigger modifier side" and "Restart cycles after another action", numeric edit borders, and footer buttons clear of the sidebar and group frames.
+
+These checks do not establish physical Windows 10 or Windows 11 acceptance, mixed-DPI behavior, or screen-reader behavior. The hosted radial capture is a desktop screenshot around a layered overlay. The test asserts preview bounds. The ring and preview frame were also inspected from offscreen bitmaps. Do not claim exact Loop parity.
 
 ## Background checks
 
