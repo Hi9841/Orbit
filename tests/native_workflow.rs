@@ -135,11 +135,17 @@ fn capture(name: &str, window: Option<HWND>) {
 }
 
 fn dispatch(host: HWND, target: HWND, action: orbit::geometry::Action) {
+    request(
+        host,
+        serde_json::json!({
+            "version": 1, "target": target.0 as isize, "action": action
+        }),
+    );
+}
+
+fn request(host: HWND, value: serde_json::Value) {
     use windows::Win32::System::DataExchange::COPYDATASTRUCT;
-    let mut payload = serde_json::to_vec(&serde_json::json!({
-        "version": 1, "target": target.0 as isize, "action": action
-    }))
-    .unwrap();
+    let mut payload = serde_json::to_vec(&value).unwrap();
     let packet = COPYDATASTRUCT {
         dwData: 0x4f52_4254,
         cbData: payload.len() as u32,
@@ -164,7 +170,27 @@ fn dispatch(host: HWND, target: HWND, action: orbit::geometry::Action) {
         0,
         "resident IPC timed out"
     );
-    assert_eq!(result as isize, 1, "resident rejected {action:?}");
+    assert_eq!(result as isize, 1, "resident rejected {value}");
+}
+
+fn middle_button(up: bool) {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dwFlags: if up {
+                    MOUSEEVENTF_MIDDLEUP
+                } else {
+                    MOUSEEVENTF_MIDDLEDOWN
+                },
+                ..Default::default()
+            },
+        },
+    };
+    assert_eq!(
+        unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) },
+        1
+    );
 }
 
 #[test]
@@ -173,8 +199,8 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     // A desktop API can block before the polling deadline gets control again.
     // Keep the hosted check bounded and preserve its last logged step.
     std::thread::spawn(|| {
-        sleep(Duration::from_secs(90));
-        eprintln!("native workflow exceeded its 90 second deadline");
+        sleep(Duration::from_secs(120));
+        eprintln!("native workflow exceeded its 120 second deadline");
         std::process::exit(1);
     });
     eprintln!("native workflow: create disposable target");
@@ -359,6 +385,38 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     wait_for(|| frame(target).0 < area.left);
     dispatch(host, target, orbit::geometry::Action::Unstash);
     wait_for(|| frame(target) == original);
+    eprintln!("native workflow: delayed middle-button trigger");
+    let settings_path = config.path().join("Orbit/settings.json");
+    let mut preferences: orbit::settings::Settings =
+        serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    preferences.middle_click_triggers = true;
+    preferences.middle_click_uses_delay = true;
+    preferences.trigger_delay_ms = 80;
+    std::fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&preferences).unwrap(),
+    )
+    .unwrap();
+    request(host, serde_json::json!({"version":1,"reload":true}));
+    unsafe { SetCursorPos(400, 350) }.unwrap();
+    middle_button(false);
+    wait_for(|| unsafe { IsWindowVisible(overlay).as_bool() });
+    unsafe { SetCursorPos(490, 350) }.unwrap();
+    wait_for(|| unsafe { IsWindowVisible(preview).as_bool() });
+    middle_button(true);
+    wait_for(|| !unsafe { IsWindowVisible(overlay).as_bool() });
+    wait_for(|| frame(target) == expected);
+    dispatch(host, target, orbit::geometry::Action::Undo);
+    wait_for(|| frame(target) == original);
+    preferences.middle_click_triggers = false;
+    preferences.middle_click_uses_delay = false;
+    preferences.trigger_delay_ms = 0;
+    std::fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&preferences).unwrap(),
+    )
+    .unwrap();
+    request(host, serde_json::json!({"version":1,"reload":true}));
     eprintln!("native workflow: recover hidden target after forced termination");
     dispatch(host, target, orbit::geometry::Action::Hide);
     wait_for(|| !unsafe { IsWindowVisible(target).as_bool() });
@@ -409,15 +467,11 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         capture(&format!("settings-{index}"), Some(settings));
     }
     eprintln!("native workflow: save settings and confirm persistence");
+    let before_save = std::fs::read(&settings_path).unwrap();
     unsafe {
         SendMessageW(settings, WM_COMMAND, Some(WPARAM(14)), None);
     }
-    wait_for(|| {
-        std::fs::read(config.path().join("Orbit/settings.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .is_some_and(|value| value.get("gradient_color").is_some())
-    });
+    wait_for(|| std::fs::read(&settings_path).is_ok_and(|bytes| bytes != before_save));
     let saved: orbit::settings::Settings =
         serde_json::from_slice(&std::fs::read(config.path().join("Orbit/settings.json")).unwrap())
             .unwrap();

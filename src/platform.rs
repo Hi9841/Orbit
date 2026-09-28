@@ -95,6 +95,7 @@ pub fn system_accent_rgb() -> Option<u32> {
 static HOOK_HOST: AtomicUsize = AtomicUsize::new(0);
 static TASKBAR_CREATED_MESSAGE: AtomicU32 = AtomicU32::new(0);
 static MIDDLE_CLICK_ENABLED: AtomicBool = AtomicBool::new(false);
+static MIDDLE_CLICK_HELD: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy)]
 struct HookMouseEvent {
     message: u32,
@@ -2142,6 +2143,7 @@ pub fn run() -> Result<(), String> {
     };
     SESSION.with(|cell| cell.borrow_mut().shortcuts = shortcuts);
     HOOK_HOST.store(host.0 as usize, Ordering::Relaxed);
+    MIDDLE_CLICK_HELD.store(false, Ordering::Release);
     let mouse_hook =
         match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), Some(instance), 0) } {
             Ok(hook) => hook,
@@ -2187,6 +2189,7 @@ pub fn run() -> Result<(), String> {
     let _ = unsafe { KillTimer(Some(host), UPDATE_TIMER_ID) };
     HOOK_HOST.store(0, Ordering::Relaxed);
     MIDDLE_CLICK_ENABLED.store(false, Ordering::Release);
+    MIDDLE_CLICK_HELD.store(false, Ordering::Release);
     let _ = unsafe { UnhookWindowsHookEx(mouse_hook) };
     if let Err(error) = restore_recoverable_on_exit() {
         notify_error(host, &error);
@@ -2546,6 +2549,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_CLOSE => {
             if SESSION.with(|cell| cell.borrow().host == Some(hwnd)) {
+                MIDDLE_CLICK_HELD.store(false, Ordering::Release);
                 finish_session(hwnd, false);
                 cancel_all_animations();
                 if let Err(error) = restore_recoverable_on_exit() {
@@ -2690,7 +2694,7 @@ unsafe extern "system" fn window_proc(
             if pending {
                 let held = match kind {
                     TriggerKind::Keyboard => trigger_held(trigger, side),
-                    TriggerKind::MiddleMouse => input_key_down(0x04),
+                    TriggerKind::MiddleMouse => MIDDLE_CLICK_HELD.load(Ordering::Acquire),
                 };
                 if !held {
                     SESSION.with(|cell| {
@@ -2737,9 +2741,13 @@ unsafe extern "system" fn window_proc(
                     select_radial_cursor(hwnd, (point.x, point.y));
                 }
             }
-            if SESSION.with(|cell| cell.borrow().trigger_kind) == TriggerKind::Keyboard
-                && !trigger_held(settings.trigger, settings.trigger_side)
-            {
+            let kind = SESSION.with(|cell| cell.borrow().trigger_kind);
+            let released = match kind {
+                TriggerKind::Keyboard => !trigger_held(settings.trigger, settings.trigger_side),
+                // The low-level hook consumes the middle button, so GetAsyncKeyState stays up.
+                TriggerKind::MiddleMouse => !MIDDLE_CLICK_HELD.load(Ordering::Acquire),
+            };
+            if released {
                 finish_session(hwnd, true);
             }
             LRESULT(0)
@@ -3148,8 +3156,13 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, message: WPARAM, details: L
     if code == HC_ACTION as i32 && details.0 != 0 {
         let data = unsafe { &*(details.0 as *const MSLLHOOKSTRUCT) };
         let event = message.0 as u32;
-        let wants_middle = MIDDLE_CLICK_ENABLED.load(Ordering::Acquire)
-            && matches!(event, WM_MBUTTONDOWN | WM_MBUTTONUP);
+        let middle_enabled = MIDDLE_CLICK_ENABLED.load(Ordering::Acquire);
+        if event == WM_MBUTTONDOWN && middle_enabled {
+            MIDDLE_CLICK_HELD.store(true, Ordering::Release);
+        } else if event == WM_MBUTTONUP {
+            MIDDLE_CLICK_HELD.store(false, Ordering::Release);
+        }
+        let wants_middle = middle_enabled && matches!(event, WM_MBUTTONDOWN | WM_MBUTTONUP);
         let (wants_drag_event, wants_wheel, wants_radial_release) = SESSION.with(|cell| {
             let session = cell.borrow();
             let wants_drag =
@@ -3472,6 +3485,7 @@ pub fn reload_settings() -> Result<(), String> {
     let Some(host) = host else {
         return Ok(());
     };
+    MIDDLE_CLICK_HELD.store(false, Ordering::Release);
     finish_session(host, false);
     cancel_all_animations();
     SESSION.with(|cell| cell.borrow_mut().drag = None);

@@ -12,8 +12,8 @@ use windows::Win32::Graphics::Gdi::{
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, ClientToScreen, CreateFontW,
     CreateRectRgn, DEFAULT_CHARSET, DEFAULT_PITCH, DeleteObject, FF_DONTCARE, FW_NORMAL,
     FW_SEMIBOLD, GetMonitorInfoW, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, OUT_DEFAULT_PRECIS, SetBkMode,
-    SetWindowRgn, TRANSPARENT,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, OPAQUE, OUT_DEFAULT_PRECIS,
+    SetBkMode, SetWindowRgn, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::Dialogs::{
@@ -26,14 +26,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKey
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON,
     CB_ADDSTRING, CB_GETCURSEL, CB_GETITEMDATA, CB_SETCURSEL, CB_SETITEMDATA, CBS_DROPDOWNLIST,
-    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, ES_AUTOVSCROLL, ES_MULTILINE,
-    ES_NUMBER, ES_WANTRETURN, GetClientRect, GetDlgItem, GetWindowTextLengthW, GetWindowTextW,
-    IDC_ARROW, IDI_APPLICATION, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LBN_SELCHANGE,
-    LBS_NOTIFY, LoadCursorW, LoadIconW, MSG, RegisterClassW, SW_SHOW, SendMessageW,
-    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_KEYDOWN, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CBS_NOINTEGRALHEIGHT, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    ES_AUTOVSCROLL, ES_MULTILINE, ES_NUMBER, ES_WANTRETURN, GetClassNameW, GetClientRect,
+    GetDlgItem, GetParent, GetWindowTextLengthW, GetWindowTextW, HWND_BOTTOM, HWND_TOP, IDC_ARROW,
+    IDI_APPLICATION, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LBN_SELCHANGE, LBS_NOTIFY,
+    LoadCursorW, LoadIconW, MSG, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DPICHANGED, WM_KEYDOWN, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GW_CHILD, GW_HWNDNEXT, GetScrollInfo, GetWindow, GetWindowRect, IsChild, SB_LINEDOWN,
@@ -371,8 +372,16 @@ unsafe extern "system" fn settings_proc(
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
             let hdc = HDC(wparam.0 as *mut _);
+            let control = HWND(lparam.0 as *mut _);
+            // The combo's selection field is a child static. Transparent text redraws
+            // on top of the previous glyphs and leaves a stale first character.
+            let background = if parent_is_class(control, "ComboBox") {
+                OPAQUE
+            } else {
+                TRANSPARENT
+            };
             unsafe {
-                let _ = SetBkMode(hdc, TRANSPARENT);
+                let _ = SetBkMode(hdc, background);
             }
             LRESULT(HBRUSH((COLOR_WINDOW.0 + 1) as usize as *mut _).0 as isize)
         }
@@ -601,8 +610,8 @@ fn content_extent(page: usize, height: i32) -> i32 {
         4 => (height - 220).max(404),
         5 => (height - 220).max(296),
         1 => (height - 212).max(450),
-        2 => (height - 220).max(370),
-        6 => (height - 220).max(520),
+        2 => (height - 220).max(470),
+        6 => (height - 220).max(560),
         7 => 238,
         _ => 0,
     }
@@ -688,7 +697,7 @@ fn create_shell(hwnd: HWND) -> Result<(), String> {
         WINDOW_STYLE(LBS_NOTIFY as u32) | WS_BORDER | WS_TABSTOP,
         SIDEBAR,
     )?;
-    child(hwnd, w!("STATIC"), w!(""), WINDOW_STYLE(0), PAGE_TITLE)?;
+    child(hwnd, w!("STATIC"), w!(""), WINDOW_STYLE(0x80), PAGE_TITLE)?;
     child(
         hwnd,
         w!("STATIC"),
@@ -760,7 +769,7 @@ fn child(
             WINDOW_EX_STYLE(0),
             class,
             text,
-            WS_CHILD | WS_VISIBLE | style,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style,
             0,
             0,
             1,
@@ -875,7 +884,9 @@ fn create_combo(parent: HWND, id: i32) -> Result<HWND, String> {
         parent,
         w!("COMBOBOX"),
         w!(""),
-        WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
+        WS_TABSTOP
+            | WS_VSCROLL
+            | WINDOW_STYLE(CBS_DROPDOWNLIST as u32 | CBS_NOINTEGRALHEIGHT as u32),
         id,
     )
 }
@@ -1284,7 +1295,7 @@ fn build_advanced(hwnd: HWND, settings: &Settings) -> Result<(), String> {
             PreviewStart::ScreenCenter => 2,
         },
     );
-    create_text(hwnd, ADV_TRIGGER_SIDE + 1000, "Trigger mouse side")?;
+    create_text(hwnd, ADV_TRIGGER_SIDE + 1000, "Trigger modifier side")?;
     let trigger_side = create_combo(hwnd, ADV_TRIGGER_SIDE)?;
     for label in ["Either side", "Left button", "Right button"] {
         send_text(trigger_side, CB_ADDSTRING, label);
@@ -1300,7 +1311,7 @@ fn build_advanced(hwnd: HWND, settings: &Settings) -> Result<(), String> {
     create_checkbox(
         hwnd,
         ADV_CYCLE_RESTART,
-        "Restart an action cycle after its last item",
+        "Restart cycles after another action",
         settings.cycle_restart,
     )?;
     create_checkbox(
@@ -2108,7 +2119,9 @@ fn build_about(hwnd: HWND) -> Result<(), String> {
 
 fn layout_window(hwnd: HWND) {
     let (width, height) = client_size_logical(hwnd);
-    move_control(hwnd, SIDEBAR, 18, 18, 186, height - 36);
+    // Keep the list above Reset. A full-height list paints its border through that button.
+    move_control(hwnd, SIDEBAR, 18, 18, 186, (height - 84).max(120));
+    raise_shell(hwnd);
     move_control(hwnd, PAGE_TITLE, 232, 18, width - 256, 34);
     move_control(hwnd, PAGE_DESCRIPTION, 232, 54, width - 256, 42);
     move_control(hwnd, STATUS, 232, height - 91, width - 256, 24);
@@ -2129,14 +2142,14 @@ fn layout_page(hwnd: HWND, page: usize) {
     match page {
         0 => {
             let column = (body_width - gap) / 2;
-            move_control(hwnd, 1700, x, body_y, column, (height - 220).max(474));
+            move_control(hwnd, 1700, x, body_y, column, (height - 220).max(1));
             move_control(
                 hwnd,
                 1701,
                 x + column + gap,
                 body_y,
                 column,
-                (height - 220).max(474),
+                (height - 220).max(1),
             );
             let row = |n: i32| body_y + 36 + n * 48;
             for (id, n) in [
@@ -2214,7 +2227,7 @@ fn layout_page(hwnd: HWND, page: usize) {
         }
         1 => {
             let half = (body_width - gap) / 2;
-            move_control(hwnd, 1710, x, body_y, body_width, (height - 212).max(450));
+            move_control(hwnd, 1710, x, body_y, body_width, (height - 220).max(1));
             move_control(
                 hwnd,
                 RADIAL_VISIBLE,
@@ -2319,7 +2332,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             );
         }
         2 => {
-            move_control(hwnd, 1720, x, body_y, body_width, (height - 220).max(370));
+            move_control(hwnd, 1720, x, body_y, body_width, (height - 220).max(1));
             move_control(
                 hwnd,
                 PREVIEW_VISIBLE,
@@ -2347,7 +2360,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             move_control(hwnd, 1721, x + 16, body_y + 318, body_width - 32, 44);
         }
         3 => {
-            move_control(hwnd, 1730, x, body_y, body_width, (height - 220).max(430));
+            move_control(hwnd, 1730, x, body_y, body_width, (height - 220).max(1));
             move_control(hwnd, 1731, x + 16, body_y + 34, body_width - 32, 24);
             let detail_x = x + 304;
             let detail_width = body_width - 320;
@@ -2437,7 +2450,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             move_control(hwnd, SHORTCUT_APPLY, detail_x, body_y + 402, 148, 28);
         }
         4 => {
-            move_control(hwnd, 1740, x, body_y, body_width, (height - 220).max(404));
+            move_control(hwnd, 1740, x, body_y, body_width, (height - 220).max(1));
             move_control(hwnd, 1741, x + 16, body_y + 34, body_width - 32, 24);
             move_control(hwnd, FRAME_LIST, x + 16, body_y + 70, 264, 300);
             move_control(hwnd, FRAME_NEW, x + 16, body_y + 376, 104, 28);
@@ -2470,7 +2483,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             move_control(hwnd, FRAME_APPLY, form_x, body_y + 294, 148, 30);
         }
         5 => {
-            move_control(hwnd, 1750, x, body_y, body_width, (height - 220).max(296));
+            move_control(hwnd, 1750, x, body_y, body_width, (height - 220).max(1));
             move_control(hwnd, 1751, x + 16, body_y + 34, body_width - 32, 24);
             move_control(hwnd, 1752, x + 16, body_y + 60, body_width - 32, 24);
             move_control(
@@ -2491,7 +2504,7 @@ fn layout_page(hwnd: HWND, page: usize) {
                 x,
                 body_y,
                 column,
-                (height - 220).max(520),
+                (height - 220).max(1),
             );
             move_control(
                 hwnd,
@@ -2499,7 +2512,7 @@ fn layout_page(hwnd: HWND, page: usize) {
                 right_x,
                 body_y,
                 column,
-                (height - 220).max(520),
+                (height - 220).max(1),
             );
             layout_numeric(
                 hwnd,
@@ -2555,13 +2568,13 @@ fn layout_page(hwnd: HWND, page: usize) {
                 right_x + 16,
                 body_y + 62,
                 column - 32,
-                230,
+                96,
             );
             move_control(
                 hwnd,
                 ADV_TRIGGER_SIDE + 1000,
                 right_x + 16,
-                body_y + 104,
+                body_y + 166,
                 column - 32,
                 22,
             );
@@ -2569,15 +2582,15 @@ fn layout_page(hwnd: HWND, page: usize) {
                 hwnd,
                 ADV_TRIGGER_SIDE,
                 right_x + 16,
-                body_y + 128,
+                body_y + 190,
                 column - 32,
-                230,
+                96,
             );
             for (id, y) in [
-                (ADV_CYCLE_RESTART, 164),
-                (ADV_DOUBLE_TAP, 194),
-                (ADV_MIDDLE_CLICK, 224),
-                (ADV_MIDDLE_DELAY, 254),
+                (ADV_CYCLE_RESTART, 292),
+                (ADV_DOUBLE_TAP, 322),
+                (ADV_MIDDLE_CLICK, 352),
+                (ADV_MIDDLE_DELAY, 382),
             ] {
                 move_control(hwnd, id, right_x + 16, body_y + y, column - 28, 26);
             }
@@ -2585,19 +2598,19 @@ fn layout_page(hwnd: HWND, page: usize) {
                 hwnd,
                 ADV_TRIGGER_TIMEOUT,
                 right_x + 16,
-                body_y + 284,
+                body_y + 412,
                 column - 32,
             );
             for (id, y) in [
-                (ADV_HIDE_NO_SELECTION, 332),
-                (ADV_HIDE_TRAY, 362),
-                (ADV_DEV_RELEASES, 392),
+                (ADV_HIDE_NO_SELECTION, 460),
+                (ADV_HIDE_TRAY, 490),
+                (ADV_DEV_RELEASES, 520),
             ] {
                 move_control(hwnd, id, right_x + 16, body_y + y, column - 28, 26);
             }
         }
         7 => {
-            move_control(hwnd, 1760, x, body_y, body_width, (height - 220).max(238));
+            move_control(hwnd, 1760, x, body_y, body_width, (height - 220).max(1));
             move_control(hwnd, 1761, x + 16, body_y + 38, body_width - 32, 24);
             move_control(hwnd, 1762, x + 16, body_y + 72, body_width - 32, 42);
             move_control(hwnd, ABOUT_UPDATE, x + 16, body_y + 138, 148, 30);
@@ -2613,6 +2626,9 @@ fn layout_page(hwnd: HWND, page: usize) {
         }
         _ => {}
     }
+    // Page controls are created after the footer. Raise the shell so group frames and
+    // combo drop-down rectangles cannot cover footer borders.
+    raise_shell(hwnd);
     // Clipped child regions move during scrolling. Erase the uncovered parent areas after all
     // controls have been positioned so stale control backgrounds cannot remain as gray bands.
     unsafe {
@@ -2623,7 +2639,7 @@ fn layout_page(hwnd: HWND, page: usize) {
 fn layout_numeric(hwnd: HWND, id: i32, x: i32, y: i32, width: i32) {
     move_control(hwnd, id + 1000, x, y, width - 94, 20);
     move_control(hwnd, id, x + width - 88, y - 2, 78, 24);
-    move_control(hwnd, field_error_id(id), x, y + 21, width, 16);
+    move_control(hwnd, field_error_id(id), x, y + 25, width, 16);
 }
 
 fn update_caption(hwnd: HWND, page: usize) {
@@ -3237,7 +3253,20 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
     if let Ok(control) = unsafe { GetDlgItem(Some(hwnd), id) } {
         let dpi = dpi_for_window(hwnd);
         let page_child = id >= PAGE_ID_START;
-        let offset = if page_child {
+        let scrolls_with_page = page_child
+            && !matches!(
+                id,
+                1700 | 1701
+                    | 1710
+                    | 1720
+                    | 1730
+                    | 1740
+                    | 1750
+                    | 1760
+                    | ADV_GROUP_PLACEMENT
+                    | ADV_GROUP_INPUT
+            );
+        let offset = if scrolls_with_page {
             STATE.with(|state| {
                 state
                     .borrow()
@@ -3261,35 +3290,131 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
                 windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
             )
         };
+        if is_group_id(id) {
+            // Group frames sit behind their fields so the frame cannot erase combo text.
+            let _ = unsafe {
+                SetWindowPos(
+                    control,
+                    Some(HWND_BOTTOM),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            };
+        }
         if page_child {
             let (_, client_height) = client_size_logical(hwnd);
-            let clip_top = 108;
             let clip_bottom = client_height - 112;
-            let visible_top = y.max(clip_top);
-            let visible_bottom = (y + height).min(clip_bottom);
-            if visible_bottom <= visible_top {
+            // Leave the group caption band fixed. Scrolling fields start below it.
+            let clip_top = if is_group_id(id) { 108 } else { 126 };
+            let combo = class_is(control, "ComboBox");
+            if combo {
+                // A region on a combo cuts the hidden drop-down list into the selection
+                // field, which paints a stale copy of the first glyph.
+                let selection_visible = y >= clip_top && y + 30 <= clip_bottom;
                 unsafe {
                     let _ = SetWindowRgn(control, None, true);
-                    let _ = ShowWindow(control, SW_HIDE);
+                    let _ = ShowWindow(
+                        control,
+                        if selection_visible {
+                            SW_SHOWNA
+                        } else {
+                            SW_HIDE
+                        },
+                    );
                 }
             } else {
-                unsafe {
-                    let _ = ShowWindow(control, SW_SHOWNA);
-                    if visible_top == y && visible_bottom == y + height {
+                let visible_top = y.max(clip_top);
+                let visible_bottom = (y + height).min(clip_bottom);
+                if visible_bottom <= visible_top {
+                    unsafe {
                         let _ = SetWindowRgn(control, None, true);
-                    } else {
-                        let region = CreateRectRgn(
-                            0,
-                            px(visible_top - y, dpi),
-                            px(width, dpi),
-                            px(visible_bottom - y, dpi),
-                        );
-                        let _ = SetWindowRgn(control, Some(region), true);
+                        let _ = ShowWindow(control, SW_HIDE);
+                    }
+                } else {
+                    unsafe {
+                        let _ = ShowWindow(control, SW_SHOWNA);
+                        if visible_top == y && visible_bottom == y + height {
+                            let _ = SetWindowRgn(control, None, true);
+                        } else {
+                            let region = CreateRectRgn(
+                                0,
+                                px(visible_top - y, dpi),
+                                px(width, dpi),
+                                px(visible_bottom - y, dpi),
+                            );
+                            let _ = SetWindowRgn(control, Some(region), true);
+                        }
                     }
                 }
             }
         }
     }
+}
+
+fn is_group_id(id: i32) -> bool {
+    matches!(
+        id,
+        1700 | 1701
+            | 1710
+            | 1720
+            | 1730
+            | 1740
+            | 1750
+            | 1760
+            | ADV_GROUP_PLACEMENT
+            | ADV_GROUP_INPUT
+    )
+}
+
+fn raise_shell(hwnd: HWND) {
+    for id in [
+        SIDEBAR,
+        PAGE_TITLE,
+        PAGE_DESCRIPTION,
+        STATUS,
+        IMPORT,
+        EXPORT,
+        CANCEL,
+        SAVE,
+        RESET,
+    ] {
+        if let Ok(control) = unsafe { GetDlgItem(Some(hwnd), id) } {
+            let _ = unsafe {
+                SetWindowPos(
+                    control,
+                    Some(HWND_TOP),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            };
+        }
+    }
+}
+
+fn class_is(hwnd: HWND, expected: &str) -> bool {
+    let mut name = [0u16; 64];
+    let len = unsafe { GetClassNameW(hwnd, &mut name) };
+    if len <= 0 {
+        return false;
+    }
+    let got = String::from_utf16_lossy(&name[..len as usize]);
+    got.eq_ignore_ascii_case(expected)
+}
+
+fn parent_is_class(control: HWND, expected: &str) -> bool {
+    let Ok(parent) = (unsafe { GetParent(control) }) else {
+        return false;
+    };
+    if parent.0.is_null() {
+        return false;
+    }
+    class_is(parent, expected)
 }
 
 fn client_size_logical(hwnd: HWND) -> (i32, i32) {
