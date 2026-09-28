@@ -47,17 +47,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW, GA_ROOT, GWL_EXSTYLE, GWL_STYLE,
     GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetPropW,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HC_ACTION, HICON, IDC_ARROW,
-    IDI_APPLICATION, IDYES, IsHungAppWindow, IsWindow, IsWindowVisible, IsZoomed, KillTimer,
-    LoadCursorW, LoadIconW, MB_ICONINFORMATION, MB_OK, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG,
-    MSLLHOOKSTRUCT, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RemovePropW,
-    SHOW_WINDOW_CMD, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageTimeoutW, SetForegroundWindow,
-    SetPropW, SetTimer, SetWindowPlacement, SetWindowPos, SetWindowsHookExW, ShowWindow,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
-    WH_MOUSE_LL, WINDOWPLACEMENT, WM_APP, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_HOTKEY,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_THICKFRAME, WindowFromPoint,
+    IDI_APPLICATION, IDYES, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
+    KillTimer, LoadCursorW, LoadIconW, MB_ICONINFORMATION, MB_OK, MB_YESNO, MF_SEPARATOR,
+    MF_STRING, MSG, MSLLHOOKSTRUCT, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
+    RemovePropW, SHOW_WINDOW_CMD, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE,
+    SW_RESTORE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageTimeoutW,
+    SetForegroundWindow, SetPropW, SetTimer, SetWindowPlacement, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WINDOWPLACEMENT, WM_APP, WM_CLOSE, WM_COPYDATA, WM_DESTROY,
+    WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_THICKFRAME,
+    WindowFromPoint,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETCLIENTAREAANIMATION, SPI_GETUIEFFECTS, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -156,6 +157,49 @@ struct ShortcutProgress {
     token: usize,
     next: usize,
     last_press: Instant,
+}
+
+fn shortcut_progress_matches(
+    progress: &ShortcutProgress,
+    window: HWND,
+    process_id: u32,
+    token: usize,
+    now: Instant,
+    timeout: std::time::Duration,
+) -> bool {
+    progress.window == window
+        && progress.process_id == process_id
+        && progress.token == token
+        && now.saturating_duration_since(progress.last_press) <= timeout
+}
+
+fn refresh_cycle_identity(
+    cycles: &mut [ShortcutCycle],
+    window: HWND,
+    process_id: u32,
+    token: usize,
+) -> usize {
+    let mut refreshed = 0;
+    for cycle in cycles {
+        for progress in &mut cycle.progress {
+            if progress.window == window && progress.process_id == process_id {
+                progress.token = token;
+                refreshed += 1;
+            }
+        }
+    }
+    refreshed
+}
+
+fn cycle_action_index(next: usize, action_count: usize, reverse: bool) -> usize {
+    if action_count == 0 {
+        return 0;
+    }
+    if reverse {
+        (next % action_count + action_count - 1) % action_count
+    } else {
+        next % action_count
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -1327,13 +1371,8 @@ fn stash(hwnd: HWND, action: Action, settings: &Settings) -> Result<(), String> 
         let _ = clear_recovery(hwnd, false);
         format!("cannot stash window: {error}")
     })?;
-    if settings.shift_focus_when_stashed
-        && let Err(error) = focus_window(hwnd, Action::FocusNextInStack, settings)
-    {
-        notify_error(
-            SESSION.with(|cell| cell.borrow().host).unwrap_or(hwnd),
-            &error,
-        );
+    if settings.shift_focus_when_stashed {
+        let _ = focus_window(hwnd, Action::FocusNextInStack, settings);
     }
     Ok(())
 }
@@ -1361,7 +1400,7 @@ fn unstash(settings: &Settings) -> Result<(), String> {
             settings,
             AnimationCompletion::Unstash {
                 entry: entry.clone(),
-                focus: true,
+                focus: settings.shift_focus_when_stashed,
             },
         )? {
             return Ok(());
@@ -1370,7 +1409,9 @@ fn unstash(settings: &Settings) -> Result<(), String> {
     restore_placement(entry.window, &entry.placement)
         .map_err(|error| format!("cannot restore stashed window: {error}"))?;
     clear_recovery(entry.window, false)?;
-    let _ = unsafe { SetForegroundWindow(entry.window) };
+    if settings.shift_focus_when_stashed {
+        let _ = unsafe { SetForegroundWindow(entry.window) };
+    }
     Ok(())
 }
 
@@ -1526,8 +1567,17 @@ fn focus_window(hwnd: HWND, action: Action, settings: &Settings) -> Result<(), S
     for (z_order, candidate) in windows.into_iter().enumerate() {
         if candidate == hwnd
             || !unsafe { IsWindowVisible(candidate).as_bool() }
+            || unsafe { IsIconic(candidate).as_bool() }
             || is_protected_window(candidate)
             || is_excluded(candidate, settings).unwrap_or(true)
+            || SESSION.with(|cell| {
+                let session = cell.borrow();
+                session
+                    .stash
+                    .iter()
+                    .chain(&session.hidden)
+                    .any(|entry| entry.window == candidate)
+            })
         {
             continue;
         }
@@ -1706,10 +1756,14 @@ fn register_shortcut_action(hwnd: HWND, id: i32) {
             let cycle = &mut session.shortcuts[index];
             cycle.progress.retain(|progress| {
                 progress.window != target
-                    || (progress.process_id == process_id
-                        && progress.token == token
-                        && now.duration_since(progress.last_press).as_millis()
-                            <= u128::from(timeout_ms))
+                    || shortcut_progress_matches(
+                        progress,
+                        target,
+                        process_id,
+                        token,
+                        now,
+                        std::time::Duration::from_millis(u64::from(timeout_ms)),
+                    )
             });
             let progress_index = cycle
                 .progress
@@ -1717,11 +1771,7 @@ fn register_shortcut_action(hwnd: HWND, id: i32) {
                 .position(|progress| progress.window == target);
             let next = progress_index.map_or(0, |index| cycle.progress[index].next);
             let reverse = cycle_backwards && cycle.ids.get(1) == Some(&id);
-            let index = if reverse {
-                (next + cycle.actions.len() - 1) % cycle.actions.len()
-            } else {
-                next % cycle.actions.len()
-            };
+            let index = cycle_action_index(next, cycle.actions.len(), reverse);
             let action = cycle.actions[index];
             let next = if reverse {
                 index
@@ -1757,6 +1807,18 @@ fn register_shortcut_action(hwnd: HWND, id: i32) {
     }
     if let Err(error) = execute_action(target, action, &settings) {
         notify_error(hwnd, &error);
+    }
+    let token = history::identity_token(target);
+    if token != 0 {
+        let mut process_id = 0;
+        unsafe {
+            GetWindowThreadProcessId(target, Some(&mut process_id));
+        }
+        if process_id != 0 {
+            SESSION.with(|cell| {
+                refresh_cycle_identity(&mut cell.borrow_mut().shortcuts, target, process_id, token);
+            });
+        }
     }
     let _ = hwnd;
 }
@@ -3723,6 +3785,59 @@ fn paint_radial(hwnd: HWND) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_cycle_keeps_progress_when_first_action_creates_history_identity() {
+        let window = HWND(std::ptr::dangling_mut());
+        let now = Instant::now();
+        let mut cycles = vec![ShortcutCycle {
+            ids: vec![SHORTCUT_HOTKEY_BASE],
+            actions: vec![Action::LeftHalf, Action::RightHalf],
+            progress: vec![ShortcutProgress {
+                window,
+                process_id: 22,
+                token: 0,
+                next: 1,
+                last_press: now,
+            }],
+        }];
+
+        assert_eq!(refresh_cycle_identity(&mut cycles, window, 22, 9001), 1);
+        let progress = &cycles[0].progress[0];
+        assert!(shortcut_progress_matches(
+            progress,
+            window,
+            22,
+            9001,
+            now + std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(1),
+        ));
+        assert_eq!(
+            cycle_action_index(progress.next, cycles[0].actions.len(), false),
+            1
+        );
+    }
+
+    #[test]
+    fn shortcut_cycle_rejects_a_reused_window_identity() {
+        let window = HWND(std::ptr::dangling_mut());
+        let now = Instant::now();
+        let progress = ShortcutProgress {
+            window,
+            process_id: 22,
+            token: 9001,
+            next: 1,
+            last_press: now,
+        };
+        assert!(!shortcut_progress_matches(
+            &progress,
+            window,
+            22,
+            9002,
+            now,
+            std::time::Duration::from_secs(1),
+        ));
+    }
 
     struct WindowGuard(HWND);
     impl Drop for WindowGuard {

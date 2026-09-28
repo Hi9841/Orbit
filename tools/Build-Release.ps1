@@ -84,6 +84,7 @@ directory = "vendor"
         }
         $sourceZip = Join-Path $dist "Orbit-$version-source.zip"
         if (Test-Path -LiteralPath $sourceZip) { Remove-Item -LiteralPath $sourceZip }
+        Add-Type -AssemblyName System.IO.Compression
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [System.IO.Compression.ZipFile]::Open($sourceZip, [System.IO.Compression.ZipArchiveMode]::Create)
         try {

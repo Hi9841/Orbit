@@ -184,7 +184,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     // Keep network and cosmetic inset out of the geometry assertions.
     std::fs::write(
         config.path().join("Orbit/settings.json"),
-        br#"{"version":1,"preview_padding":0,"updates_enabled":false,"animate_window_resizes":true,"animate_stashed_windows":true,"animation_duration_ms":120}"#,
+        br#"{"version":1,"preview_padding":0,"updates_enabled":false,"animate_window_resizes":true,"animate_stashed_windows":true,"animation_duration_ms":120,"shortcuts":[{"hotkey":{"key":90},"actions":["undo"]},{"hotkey":{"key":88},"actions":["left_half","right_half"]}]}"#,
     )
     .unwrap();
     let foreground = unsafe { GetForegroundWindow() };
@@ -244,6 +244,37 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     wait_for(|| unsafe { GetForegroundWindow() } == target);
     eprintln!("native workflow: target focused");
     let original = frame(target);
+    eprintln!("native workflow: cycle shortcut on a previously untracked window");
+    {
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        assert!(unsafe {
+            GetMonitorInfoW(
+                MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST),
+                &mut info,
+            )
+            .as_bool()
+        });
+        let area = info.rcWork;
+        let middle = area.left + (area.right - area.left) / 2;
+        for expected in [
+            (area.left, area.top, middle, area.bottom),
+            (middle, area.top, area.right, area.bottom),
+        ] {
+            for key in [VK_CONTROL, VK_MENU, VIRTUAL_KEY(u16::from(b'X'))] {
+                key_event(key, false);
+            }
+            for key in [VIRTUAL_KEY(u16::from(b'X')), VK_MENU, VK_CONTROL] {
+                key_event(key, true);
+            }
+            wait_for(|| frame(target) == expected);
+        }
+        dispatch(host, target, orbit::geometry::Action::Undo);
+        dispatch(host, target, orbit::geometry::Action::Undo);
+        wait_for(|| frame(target) == original);
+    }
     let begin = || {
         eprintln!("native workflow: release keys and begin radial");
         wait_for(|| {
