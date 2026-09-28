@@ -79,14 +79,33 @@ fn wait_for(mut condition: impl FnMut() -> bool) {
 fn frame(window: HWND) -> (i32, i32, i32, i32) {
     let mut rect = RECT::default();
     unsafe { GetWindowRect(window, &mut rect) }.unwrap();
-    let _ = unsafe { windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(window, windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS, (&mut rect as *mut RECT).cast(), std::mem::size_of::<RECT>() as u32) };
+    let _ = unsafe {
+        windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            window,
+            windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS,
+            (&mut rect as *mut RECT).cast(),
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
     (rect.left, rect.top, rect.right, rect.bottom)
 }
 
 #[test]
 #[ignore = "takes foreground focus; run explicitly with --ignored --test-threads=1"]
 fn radial_preview_cancel_commit_undo_and_settings() {
-    unsafe { let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); }
+    // A desktop API can block before the polling deadline gets control again.
+    // Keep the hosted check bounded and preserve its last logged step.
+    std::thread::spawn(|| {
+        sleep(Duration::from_secs(45));
+        eprintln!("native workflow exceeded its 45 second deadline");
+        std::process::exit(1);
+    });
+    eprintln!("native workflow: create disposable target");
+    unsafe {
+        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
     assert!(
         unsafe { FindWindowW(w!("OrbitWindow"), w!("Orbit")) }.is_err(),
         "quit Orbit before the desktop test"
@@ -94,7 +113,11 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     let config = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(config.path().join("Orbit")).unwrap();
     // Keep network and cosmetic inset out of the geometry assertions.
-    std::fs::write(config.path().join("Orbit/settings.json"), br#"{"version":1,"preview_padding":0,"updates_enabled":false}"#).unwrap();
+    std::fs::write(
+        config.path().join("Orbit/settings.json"),
+        br#"{"version":1,"preview_padding":0,"updates_enabled":false}"#,
+    )
+    .unwrap();
     let foreground = unsafe { GetForegroundWindow() };
     let mut cursor = POINT::default();
     unsafe { GetCursorPos(&mut cursor) }.unwrap();
@@ -127,6 +150,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         foreground,
     };
     let mut host = HWND::default();
+    eprintln!("native workflow: wait for resident");
     wait_for(|| {
         host = unsafe { FindWindowW(w!("OrbitWindow"), w!("Orbit")) }.unwrap_or_default();
         !host.0.is_null()
@@ -139,6 +163,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     });
     // Wait for startup to finish registering both global bindings.
     sleep(Duration::from_millis(150));
+    eprintln!("native workflow: focus target");
     key_event(VK_MENU, false);
     key_event(VK_MENU, true);
     assert!(
@@ -148,6 +173,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     wait_for(|| unsafe { GetForegroundWindow() } == target);
     let original = frame(target);
     let begin = || {
+        eprintln!("native workflow: release keys and begin radial");
         wait_for(|| {
             [VK_CONTROL, VK_MENU, VK_SPACE, VK_ESCAPE]
                 .iter()
@@ -162,9 +188,11 @@ fn radial_preview_cancel_commit_undo_and_settings() {
             key_event(key, false);
         }
         wait_for(|| unsafe { IsWindowVisible(overlay).as_bool() });
+        eprintln!("native workflow: radial visible");
         unsafe { SetCursorPos(490, 350) }.unwrap();
     };
     begin();
+    eprintln!("native workflow: inspect preview");
     let preview = unsafe { FindWindowW(w!("OrbitWindow"), w!("Orbit preview")) }.unwrap();
     wait_for(|| unsafe { IsWindowVisible(preview).as_bool() });
     assert_eq!(frame(target), original, "preview must not move the target");
@@ -188,6 +216,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     );
     assert_eq!(frame(preview), expected);
     key_event(VK_ESCAPE, false);
+    eprintln!("native workflow: cancel radial");
     wait_for(|| !unsafe { IsWindowVisible(overlay).as_bool() });
     assert!(!unsafe { IsWindowVisible(preview).as_bool() });
     for key in [VK_ESCAPE, VK_SPACE, VK_MENU, VK_CONTROL] {
@@ -199,6 +228,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         "Escape must preserve the original frame"
     );
     begin();
+    eprintln!("native workflow: commit radial");
     wait_for(|| unsafe { IsWindowVisible(preview).as_bool() });
     for key in [VK_SPACE, VK_MENU, VK_CONTROL] {
         key_event(key, true);
@@ -213,6 +243,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         key_event(key, true);
     }
     wait_for(|| frame(target) == original);
+    eprintln!("native workflow: open settings");
     // Exercise the command through the executable, then inspect the real settings window.
     assert!(
         Command::new(env!("CARGO_BIN_EXE_orbit"))
@@ -226,5 +257,6 @@ fn radial_preview_cancel_commit_undo_and_settings() {
             .is_ok_and(|h| unsafe { IsWindowVisible(h).as_bool() })
     });
     unsafe { PostMessageW(Some(host), WM_CLOSE, Default::default(), Default::default()) }.unwrap();
+    eprintln!("native workflow: quit resident");
     wait_for(|| guard.child.try_wait().unwrap().is_some());
 }

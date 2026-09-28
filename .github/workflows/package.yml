@@ -6,6 +6,7 @@ permissions:
 jobs:
   package:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -29,11 +30,12 @@ jobs:
         shell: pwsh
         run: ./tools/Test-Installer.ps1
       - name: Exercise native windows on disposable hosted runner
+        timeout-minutes: 5
         shell: pwsh
         run: |
           cargo test --locked --bin orbit -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --test native_workflow -- --ignored --test-threads=1
+          cargo test --locked --test native_workflow -- --ignored --test-threads=1 --nocapture
       - uses: actions/upload-artifact@v4
         with:
           name: Orbit-windows-x64
