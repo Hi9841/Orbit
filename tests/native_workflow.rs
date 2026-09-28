@@ -164,13 +164,16 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     // Wait for startup to finish registering both global bindings.
     sleep(Duration::from_millis(150));
     eprintln!("native workflow: focus target");
-    key_event(VK_MENU, false);
-    key_event(VK_MENU, true);
+    // Establish last-input ownership without activating an Alt system-menu loop.
+    key_event(VK_F24, false);
+    key_event(VK_F24, true);
+    eprintln!("native workflow: request foreground target");
     assert!(
         unsafe { SetForegroundWindow(target).as_bool() },
         "Windows denied foreground focus to the disposable target"
     );
     wait_for(|| unsafe { GetForegroundWindow() } == target);
+    eprintln!("native workflow: target focused");
     let original = frame(target);
     let begin = || {
         eprintln!("native workflow: release keys and begin radial");
@@ -179,8 +182,8 @@ fn radial_preview_cancel_commit_undo_and_settings() {
                 .iter()
                 .all(|key| unsafe { GetAsyncKeyState(key.0 as i32) as u16 & 0x8000 == 0 })
         });
-        key_event(VK_MENU, false);
-        key_event(VK_MENU, true);
+        key_event(VK_F24, false);
+        key_event(VK_F24, true);
         assert!(unsafe { SetForegroundWindow(target).as_bool() });
         wait_for(|| unsafe { GetForegroundWindow() } == target);
         unsafe { SetCursorPos(400, 350) }.unwrap();
@@ -214,7 +217,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         area.right,
         area.bottom,
     );
-    assert_eq!(frame(preview), expected);
+    wait_for(|| frame(preview) == expected);
     key_event(VK_ESCAPE, false);
     eprintln!("native workflow: cancel radial");
     wait_for(|| !unsafe { IsWindowVisible(overlay).as_bool() });
