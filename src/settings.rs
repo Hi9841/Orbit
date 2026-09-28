@@ -44,6 +44,33 @@ fn default_radial_actions() -> [Action; 8] {
     Action::RADIAL
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EdgePadding {
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub left: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerSide {
+    #[default]
+    Either,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewStart {
+    ScreenCenter,
+    RadialMenu,
+    #[default]
+    ActionCenter,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -80,6 +107,29 @@ pub struct Settings {
     pub stash_visible_padding: i32,
     pub updates_enabled: bool,
     pub cycle_backwards_on_shift: bool,
+    pub use_system_accent: bool,
+    pub use_gradient: bool,
+    pub gradient_color: u32,
+    pub preview_border_thickness: u32,
+    pub preview_use_window_corner_radius: bool,
+    pub edge_padding: Option<EdgePadding>,
+    pub padding_minimum_screen_inches: f64,
+    pub animation_duration_ms: u32,
+    pub animate_window_resizes: bool,
+    pub animate_stashed_windows: bool,
+    pub ignore_low_power_mode: bool,
+    pub preview_start: PreviewStart,
+    pub restore_window_frame_on_drag: bool,
+    pub shift_focus_when_stashed: bool,
+    pub cycle_restart: bool,
+    pub trigger_side: TriggerSide,
+    pub double_tap_to_trigger: bool,
+    pub middle_click_triggers: bool,
+    pub middle_click_uses_delay: bool,
+    pub trigger_timeout_ms: u32,
+    pub hide_on_no_selection: bool,
+    pub hide_tray_icon: bool,
+    pub include_development_versions: bool,
 }
 
 impl Default for Settings {
@@ -124,6 +174,29 @@ impl Default for Settings {
             stash_visible_padding: 20,
             updates_enabled: true,
             cycle_backwards_on_shift: true,
+            use_system_accent: false,
+            use_gradient: false,
+            gradient_color: 0x3b82f6,
+            preview_border_thickness: 4,
+            preview_use_window_corner_radius: true,
+            edge_padding: None,
+            padding_minimum_screen_inches: 0.0,
+            animation_duration_ms: 180,
+            animate_window_resizes: false,
+            animate_stashed_windows: false,
+            ignore_low_power_mode: false,
+            preview_start: PreviewStart::ActionCenter,
+            restore_window_frame_on_drag: false,
+            shift_focus_when_stashed: true,
+            cycle_restart: false,
+            trigger_side: TriggerSide::Either,
+            double_tap_to_trigger: false,
+            middle_click_triggers: false,
+            middle_click_uses_delay: false,
+            trigger_timeout_ms: 0,
+            hide_on_no_selection: false,
+            hide_tray_icon: false,
+            include_development_versions: false,
         }
     }
 }
@@ -158,6 +231,30 @@ impl Settings {
 
     /// Validate imported settings without silently rewriting invalid values.
     pub fn validate(&self) -> Result<(), String> {
+        if self.accent_color > 0xffffff || self.gradient_color > 0xffffff {
+            return Err("colors must be valid RGB values".into());
+        }
+        if self.preview_border_thickness > 32 {
+            return Err("preview_border_thickness must be between 0 and 32".into());
+        }
+        if self.animation_duration_ms > 2000 {
+            return Err("animation_duration_ms must be between 0 and 2000".into());
+        }
+        if self.trigger_timeout_ms > 600000 {
+            return Err("trigger_timeout_ms must be between 0 and 600000".into());
+        }
+        if !self.padding_minimum_screen_inches.is_finite()
+            || !(0.0..=200.0).contains(&self.padding_minimum_screen_inches)
+        {
+            return Err("padding_minimum_screen_inches must be between 0 and 200".into());
+        }
+        if self.edge_padding.is_some_and(|p| {
+            [p.top, p.right, p.bottom, p.left]
+                .iter()
+                .any(|x| !(0..=200).contains(x))
+        }) {
+            return Err("edge padding must be between 0 and 200 pixels per edge".into());
+        }
         if self.version != 1 {
             return Err(format!("unsupported settings version {}", self.version));
         }
@@ -321,6 +418,11 @@ mod tests {
         assert!(!settings.snap_on_drag);
         assert_eq!(settings.trigger.key, 0x20);
         assert_eq!(settings.radial_size, 100);
+        assert_eq!(settings.edge_padding, None);
+        assert_eq!(settings.trigger_side, TriggerSide::Either);
+        assert!(!settings.include_development_versions);
+        assert!(!settings.double_tap_to_trigger);
+        settings.validate().unwrap();
     }
 
     #[test]
@@ -351,5 +453,42 @@ mod tests {
         settings.custom_frames.clear();
         settings.trigger.key = 0;
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn advanced_preferences_round_trip_and_reject_invalid_ranges() {
+        let settings = Settings {
+            edge_padding: Some(EdgePadding {
+                top: 2,
+                right: 4,
+                bottom: 8,
+                left: 16,
+            }),
+            trigger_side: TriggerSide::Right,
+            preview_start: PreviewStart::RadialMenu,
+            include_development_versions: true,
+            double_tap_to_trigger: true,
+            padding_minimum_screen_inches: 24.0,
+            ..Default::default()
+        };
+        settings.validate().unwrap();
+        let parsed: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(parsed.edge_padding, settings.edge_padding);
+        assert_eq!(parsed.trigger_side, TriggerSide::Right);
+        assert_eq!(parsed.preview_start, PreviewStart::RadialMenu);
+        assert!(parsed.include_development_versions && parsed.double_tap_to_trigger);
+        for mutate in [
+            |s: &mut Settings| s.edge_padding.as_mut().unwrap().left = -1,
+            |s: &mut Settings| s.preview_border_thickness = 33,
+            |s: &mut Settings| s.animation_duration_ms = 2001,
+            |s: &mut Settings| s.trigger_timeout_ms = 600001,
+            |s: &mut Settings| s.padding_minimum_screen_inches = f64::NAN,
+            |s: &mut Settings| s.gradient_color = 0x1000000,
+        ] {
+            let mut invalid = settings.clone();
+            mutate(&mut invalid);
+            assert!(invalid.validate().is_err());
+        }
     }
 }

@@ -60,7 +60,7 @@ This creates an installer, corresponding source archive, dependency notices, and
 
 ## Verification and limits
 
-The [parity checklist](migration/parity.md) distinguishes implementation from desktop verification. The expanded settings and advanced window actions need interactive testing on Windows 10 and 11, including mixed-DPI monitors. Automated checks do not prove visual or behavioral parity with Loop.
+The [parity checklist](migration/parity.md) distinguishes implementation from desktop verification. Hosted Windows checks exercise real radial input, preview, undo, stash and crash recovery, settings, installation, update handoff, and uninstall. Windows 10/11 mixed-DPI and screen-reader acceptance still need testing. These checks do not prove exact visual or behavioral parity with Loop.
 
 Desktop tests are opt-in because they open windows and take focus. Do not run ignored tests or `tools/Test-Installer.ps1` on a user's active desktop without their permission.
 

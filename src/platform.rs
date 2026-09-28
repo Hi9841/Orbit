@@ -1,7 +1,7 @@
 use crate::history::{self, History};
 use crate::settings_window;
 use orbit::geometry::{Action, Rect};
-use orbit::settings::{Hotkey, Settings};
+use orbit::settings::{Hotkey, Settings, TriggerSide};
 use orbit::update::{self, Manifest};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -9,25 +9,30 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{
-    COLORREF, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
-use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmGetColorizationColor, DwmGetWindowAttribute, DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, EnumDisplayMonitors, FillRect,
-    GetMonitorInfoW, HGDIOBJ, HMONITOR, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
+    BeginPaint, CreateDCW, DeleteDC, EndPaint, EnumDisplayMonitors, GetDeviceCaps, GetMonitorInfoW,
+    HMONITOR, HORZSIZE, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint,
+    MonitorFromWindow, PAINTSTRUCT, VERTSIZE,
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::Threading::{
     CreateMutexW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_ESCAPE, VK_SHIFT,
+    GetAsyncKeyState, GetDoubleClickTime, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_ESCAPE, VK_SHIFT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, RegisterHotKey, UnregisterHotKey, VK_CONTROL, VK_MENU,
@@ -41,20 +46,23 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW, GA_ROOT, GWL_EXSTYLE, GWL_STYLE,
     GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetPropW,
-    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HC_ACTION, IDC_ARROW,
+    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HC_ACTION, HICON, IDC_ARROW,
     IDI_APPLICATION, IDYES, IsHungAppWindow, IsWindow, IsWindowVisible, IsZoomed, KillTimer,
     LoadCursorW, LoadIconW, MB_ICONINFORMATION, MB_OK, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG,
     MSLLHOOKSTRUCT, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RemovePropW,
     SHOW_WINDOW_CMD, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageTimeoutW, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetPropW, SetTimer, SetWindowPlacement, SetWindowPos,
-    SetWindowsHookExW, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WINDOWPLACEMENT, WM_APP, WM_CLOSE,
-    WM_COPYDATA, WM_DESTROY, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    SetPropW, SetTimer, SetWindowPlacement, SetWindowPos, SetWindowsHookExW, ShowWindow,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
+    WH_MOUSE_LL, WINDOWPLACEMENT, WM_APP, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_HOTKEY,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_THICKFRAME, WindowFromPoint,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, LWA_ALPHA, WS_EX_TRANSPARENT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    SPI_GETCLIENTAREAANIMATION, SPI_GETUIEFFECTS, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SystemParametersInfoW, WS_EX_TRANSPARENT,
+};
 use windows::core::BOOL;
 use windows::core::{PCWSTR, w};
 
@@ -62,6 +70,7 @@ const HOTKEY_ID: i32 = 1;
 const SHORTCUT_HOTKEY_BASE: i32 = 100;
 const TIMER_ID: usize = 1;
 const UPDATE_TIMER_ID: usize = 2;
+const ANIMATION_TIMER_ID: usize = 3;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
 const OPEN_SETTINGS_MESSAGE: u32 = WM_APP + 2;
 const UPDATE_AVAILABLE_MESSAGE: u32 = WM_APP + 3;
@@ -74,7 +83,17 @@ const IPC_MAGIC: usize = 0x4f52_4254;
 const IPC_TIMEOUT_MS: u32 = 5000;
 const MAX_IPC_BYTES: usize = 4096;
 const RECOVERY_PROPERTY: windows::core::PCWSTR = w!("Orbit.Recovery.6C96F66A");
+
+pub fn system_accent_rgb() -> Option<u32> {
+    let mut color = 0;
+    let mut opaque = BOOL(0);
+    unsafe { DwmGetColorizationColor(&mut color, &mut opaque) }
+        .ok()
+        .map(|()| color & 0x00ff_ffff)
+}
 static HOOK_HOST: AtomicUsize = AtomicUsize::new(0);
+static TASKBAR_CREATED_MESSAGE: AtomicU32 = AtomicU32::new(0);
+static MIDDLE_CLICK_ENABLED: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy)]
 struct HookMouseEvent {
     message: u32,
@@ -108,6 +127,18 @@ struct Session {
     hidden: Vec<StashedWindow>,
     trigger_started: Option<Instant>,
     trigger_pending: bool,
+    trigger_kind: TriggerKind,
+    trigger_wait_double_tap: bool,
+    last_trigger_key_release: Option<Instant>,
+    last_middle_release: Option<Instant>,
+    tray_icon: Option<HICON>,
+    tray_installed: bool,
+    animations: Vec<WindowAnimation>,
+    animation_versions: Vec<(isize, u64)>,
+    animation_tick_active: bool,
+    preview_animation: Option<PreviewAnimation>,
+    preview_animation_generation: u64,
+    preview_bitmap_cache: Option<(PreviewStyleKey, Arc<crate::preview::PreviewBitmap>)>,
     drag: Option<DragState>,
 }
 
@@ -115,8 +146,23 @@ struct Session {
 struct ShortcutCycle {
     ids: Vec<i32>,
     actions: Vec<Action>,
+    progress: Vec<ShortcutProgress>,
+}
+
+#[derive(Clone, Copy)]
+struct ShortcutProgress {
+    window: HWND,
+    process_id: u32,
+    token: usize,
     next: usize,
-    last_press: Option<Instant>,
+    last_press: Instant,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum TriggerKind {
+    #[default]
+    Keyboard,
+    MiddleMouse,
 }
 
 #[derive(Clone)]
@@ -126,6 +172,46 @@ struct StashedWindow {
     process_id: u32,
     token: usize,
     hidden: bool,
+    original_frame: Rect,
+}
+
+struct WindowAnimation {
+    window: HWND,
+    process_id: u32,
+    history_token: usize,
+    recovery_token: usize,
+    generation: u64,
+    from: Rect,
+    to: Rect,
+    started: Instant,
+    duration: std::time::Duration,
+    completion: AnimationCompletion,
+}
+
+enum AnimationCompletion {
+    None,
+    Unstash { entry: StashedWindow, focus: bool },
+}
+
+struct PreviewAnimation {
+    from: Rect,
+    to: Rect,
+    started: Instant,
+    duration: std::time::Duration,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PreviewStyleKey {
+    width: i32,
+    height: i32,
+    dpi: u32,
+    accent: u32,
+    gradient: u32,
+    opacity: u8,
+    border: u32,
+    radius: u32,
+    use_gradient: bool,
 }
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -164,6 +250,8 @@ struct DragState {
     start_cursor: POINT,
     last_cursor: POINT,
     start_frame: RECT,
+    start_visible: Rect,
+    restore_frame: bool,
     candidate: Option<Action>,
 }
 
@@ -389,36 +477,64 @@ struct Monitor {
     handle: HMONITOR,
     work: Rect,
     full: Rect,
+    physical_inches: Option<f64>,
 }
 
 fn monitor_info(handle: HMONITOR) -> Result<Monitor, String> {
     if handle.0.is_null() {
         return Err("cannot find target monitor".into());
     }
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+    let mut info = MONITORINFOEXW {
+        monitorInfo: MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+            ..Default::default()
+        },
         ..Default::default()
     };
-    if !unsafe { GetMonitorInfoW(handle, &mut info).as_bool() } {
+    if !unsafe { GetMonitorInfoW(handle, &mut info.monitorInfo).as_bool() } {
         return Err(format!(
             "cannot read monitor work area: {}",
             windows::core::Error::from_thread()
         ));
     }
+    let device_end = info
+        .szDevice
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(info.szDevice.len());
+    let display = unsafe {
+        CreateDCW(
+            w!("DISPLAY"),
+            PCWSTR(info.szDevice.as_ptr()),
+            PCWSTR::null(),
+            None,
+        )
+    };
+    let physical_inches = if display.0.is_null() {
+        None
+    } else {
+        let width_mm = unsafe { GetDeviceCaps(Some(display), HORZSIZE) };
+        let height_mm = unsafe { GetDeviceCaps(Some(display), VERTSIZE) };
+        let _ = unsafe { DeleteDC(display) };
+        (width_mm > 0 && height_mm > 0)
+            .then(|| f64::from(width_mm).hypot(f64::from(height_mm)) / 25.4)
+    };
+    let _ = device_end;
     Ok(Monitor {
         handle,
         work: Rect {
-            left: info.rcWork.left,
-            top: info.rcWork.top,
-            right: info.rcWork.right,
-            bottom: info.rcWork.bottom,
+            left: info.monitorInfo.rcWork.left,
+            top: info.monitorInfo.rcWork.top,
+            right: info.monitorInfo.rcWork.right,
+            bottom: info.monitorInfo.rcWork.bottom,
         },
         full: Rect {
-            left: info.rcMonitor.left,
-            top: info.rcMonitor.top,
-            right: info.rcMonitor.right,
-            bottom: info.rcMonitor.bottom,
+            left: info.monitorInfo.rcMonitor.left,
+            top: info.monitorInfo.rcMonitor.top,
+            right: info.monitorInfo.rcMonitor.right,
+            bottom: info.monitorInfo.rcMonitor.bottom,
         },
+        physical_inches,
     })
 }
 
@@ -465,14 +581,15 @@ fn monitor_for(hwnd: HWND, settings: &Settings) -> Result<Monitor, String> {
 fn target_frame(hwnd: HWND, action: Action, settings: &Settings) -> Result<Rect, String> {
     let current = rect_from_window(hwnd)?;
     let monitor = monitor_for(hwnd, settings)?;
+    let work = effective_work_area(monitor, settings);
     if action == Action::Fullscreen {
         return Ok(monitor.full);
     }
     if action == Action::MacOSCenter {
-        let width = current.width().min(monitor.work.width());
-        let height = current.height().min(monitor.work.height());
-        let left = monitor.work.left + (monitor.work.width() - width) / 2;
-        let top = monitor.work.top + (monitor.work.height() - height) / 4;
+        let width = current.width().min(work.width());
+        let height = current.height().min(work.height());
+        let left = work.left + (work.width() - width) / 2;
+        let top = work.top + (work.height() - height) / 4;
         return Ok(Rect {
             left,
             top,
@@ -498,7 +615,7 @@ fn target_frame(hwnd: HWND, action: Action, settings: &Settings) -> Result<Rect,
             .filter_map(|candidate| rect_from_window(candidate).ok())
             .collect();
         return Ok(
-            orbit::available_space::largest_frame(monitor.work, current, &obstacles)
+            orbit::available_space::largest_frame(work, current, &obstacles)
                 .inset(settings.padding),
         );
     }
@@ -507,22 +624,30 @@ fn target_frame(hwnd: HWND, action: Action, settings: &Settings) -> Result<Rect,
             .custom_frames
             .get(usize::from(index))
             .ok_or_else(|| format!("custom frame {index} does not exist"))?;
-        let x = monitor.work.width();
-        let y = monitor.work.height();
+        let x = work.width();
+        let y = work.height();
         return Ok(Rect {
-            left: monitor.work.left + (f64::from(x) * frame.x).round() as i32,
-            top: monitor.work.top + (f64::from(y) * frame.y).round() as i32,
-            right: monitor.work.left + (f64::from(x) * (frame.x + frame.width)).round() as i32,
-            bottom: monitor.work.top + (f64::from(y) * (frame.y + frame.height)).round() as i32,
+            left: work.left + (f64::from(x) * frame.x).round() as i32,
+            top: work.top + (f64::from(y) * frame.y).round() as i32,
+            right: work.left + (f64::from(x) * (frame.x + frame.width)).round() as i32,
+            bottom: work.top + (f64::from(y) * (frame.y + frame.height)).round() as i32,
         }
         .inset(settings.padding));
     }
-    Ok(action.frame_with_increment(
-        monitor.work,
-        current,
-        settings.padding,
-        settings.size_increment,
-    ))
+    Ok(action.frame_with_increment(work, current, settings.padding, settings.size_increment))
+}
+
+fn effective_work_area(monitor: Monitor, settings: &Settings) -> Rect {
+    let Some(edge) = settings.edge_padding else {
+        return monitor.work;
+    };
+    let minimum = settings.padding_minimum_screen_inches;
+    if minimum > 0.0 && !monitor.physical_inches.is_some_and(|size| size > minimum) {
+        return monitor.work;
+    }
+    monitor
+        .work
+        .inset_edges(edge.top, edge.right, edge.bottom, edge.left)
 }
 
 fn rect_from_window(hwnd: HWND) -> Result<Rect, String> {
@@ -557,6 +682,23 @@ fn rect_from_window(hwnd: HWND) -> Result<Rect, String> {
 }
 
 fn set_visible_frame(
+    hwnd: HWND,
+    target: Rect,
+    extra_flags: windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS,
+) -> Result<(), String> {
+    position_visible_frame(hwnd, target, extra_flags)?;
+    let actual = rect_from_window(hwnd)?;
+    if (actual.left - target.left).abs() > 2
+        || (actual.top - target.top).abs() > 2
+        || (actual.right - target.right).abs() > 2
+        || (actual.bottom - target.bottom).abs() > 2
+    {
+        return Err("the target window refused the requested frame".into());
+    }
+    Ok(())
+}
+
+fn position_visible_frame(
     hwnd: HWND,
     target: Rect,
     extra_flags: windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS,
@@ -608,15 +750,324 @@ fn set_visible_frame(
         )
     }
     .map_err(|error| format!("cannot position window: {error}"))?;
-    let actual = rect_from_window(hwnd)?;
-    if (actual.left - target.left).abs() > 2
-        || (actual.top - target.top).abs() > 2
-        || (actual.right - target.right).abs() > 2
-        || (actual.bottom - target.bottom).abs() > 2
-    {
-        return Err("the target window refused the requested frame".into());
-    }
     Ok(())
+}
+
+fn animations_allowed(settings: &Settings) -> bool {
+    if settings.animation_duration_ms == 0 {
+        return false;
+    }
+    for action in [SPI_GETCLIENTAREAANIMATION, SPI_GETUIEFFECTS] {
+        let mut enabled = BOOL(1);
+        if unsafe {
+            SystemParametersInfoW(
+                action,
+                0,
+                Some((&mut enabled as *mut BOOL).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        }
+        .is_ok()
+            && !enabled.as_bool()
+        {
+            return false;
+        }
+    }
+    if !settings.ignore_low_power_mode {
+        let mut status = SYSTEM_POWER_STATUS::default();
+        if unsafe { GetSystemPowerStatus(&mut status) }.is_ok() && status.SystemStatusFlag == 1 {
+            return false;
+        }
+    }
+    true
+}
+
+fn bump_animation_generation(session: &mut Session, hwnd: HWND) -> u64 {
+    let key = hwnd.0 as isize;
+    if let Some((_, generation)) = session
+        .animation_versions
+        .iter_mut()
+        .find(|(window, _)| *window == key)
+    {
+        *generation = generation.wrapping_add(1).max(1);
+        *generation
+    } else {
+        session.animation_versions.push((key, 1));
+        1
+    }
+}
+
+fn animation_is_current(hwnd: HWND, generation: u64) -> bool {
+    SESSION.with(|cell| {
+        cell.borrow()
+            .animation_versions
+            .iter()
+            .any(|(window, current)| *window == hwnd.0 as isize && *current == generation)
+    })
+}
+
+fn cancel_window_animation(hwnd: HWND) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    let host = SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        let needs_invalidation = session.animation_tick_active
+            || session
+                .animations
+                .iter()
+                .any(|animation| animation.window == hwnd);
+        session
+            .animations
+            .retain(|animation| animation.window != hwnd);
+        if needs_invalidation {
+            bump_animation_generation(&mut session, hwnd);
+        }
+        session.host
+    });
+    if let Some(host) = host {
+        let idle = SESSION.with(|cell| {
+            let session = cell.borrow();
+            session.animations.is_empty() && session.preview_animation.is_none()
+        });
+        if idle {
+            unsafe {
+                let _ = KillTimer(Some(host), ANIMATION_TIMER_ID);
+            }
+        }
+    }
+}
+
+fn cancel_all_animations() {
+    let (host, windows) = SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        let mut windows = session
+            .animations
+            .iter()
+            .map(|animation| animation.window)
+            .collect::<Vec<_>>();
+        session.animations.clear();
+        session.preview_animation = None;
+        if session.animation_tick_active {
+            windows.extend(
+                session
+                    .animation_versions
+                    .iter()
+                    .map(|(window, _)| HWND(*window as *mut _)),
+            );
+        }
+        (session.host, windows)
+    });
+    SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        for window in windows {
+            bump_animation_generation(&mut session, window);
+        }
+    });
+    if let Some(host) = host {
+        unsafe {
+            let _ = KillTimer(Some(host), ANIMATION_TIMER_ID);
+        }
+    }
+}
+
+fn start_window_animation(
+    hwnd: HWND,
+    from: Rect,
+    to: Rect,
+    settings: &Settings,
+    completion: AnimationCompletion,
+) -> Result<bool, String> {
+    if from == to || !animations_allowed(settings) {
+        return Ok(false);
+    }
+    if unsafe { IsHungAppWindow(hwnd).as_bool() } {
+        return Err("target window is not responding".into());
+    }
+    let Some(host) = SESSION.with(|cell| cell.borrow().host) else {
+        return Ok(false);
+    };
+    let history_token = history::identity_token(hwnd);
+    if history_token == 0 {
+        return Ok(false);
+    }
+    let recovery_token = unsafe { GetPropW(hwnd, RECOVERY_PROPERTY) }.0 as usize;
+    let mut process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+    }
+    if process_id == 0 {
+        return Ok(false);
+    }
+    let generation = SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        let generation = bump_animation_generation(&mut session, hwnd);
+        session
+            .animations
+            .retain(|animation| animation.window != hwnd);
+        session.animations.push(WindowAnimation {
+            window: hwnd,
+            process_id,
+            history_token,
+            recovery_token,
+            generation,
+            from,
+            to,
+            started: Instant::now(),
+            duration: std::time::Duration::from_millis(u64::from(settings.animation_duration_ms)),
+            completion,
+        });
+        generation
+    });
+    unsafe {
+        let _ = SetTimer(Some(host), ANIMATION_TIMER_ID, 16, None);
+    }
+    let _ = generation;
+    Ok(true)
+}
+
+fn interpolate_rect(from: Rect, to: Rect, progress: f64) -> Rect {
+    let progress = progress.clamp(0.0, 1.0);
+    let interpolate = |start: i32, end: i32| {
+        (f64::from(start) + f64::from(end.saturating_sub(start)) * progress)
+            .round()
+            .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    };
+    Rect {
+        left: interpolate(from.left, to.left),
+        top: interpolate(from.top, to.top),
+        right: interpolate(from.right, to.right),
+        bottom: interpolate(from.bottom, to.bottom),
+    }
+}
+
+fn advance_window_animations(host: HWND) {
+    let now = Instant::now();
+    let preview_animation = SESSION.with(|cell| cell.borrow_mut().preview_animation.take());
+    if let Some(animation) = preview_animation {
+        let current_generation = SESSION.with(|cell| cell.borrow().preview_animation_generation);
+        if current_generation == animation.generation {
+            let progress = (now.duration_since(animation.started).as_secs_f64()
+                / animation.duration.as_secs_f64())
+            .clamp(0.0, 1.0);
+            let frame =
+                interpolate_rect(animation.from, animation.to, 1.0 - (1.0 - progress).powi(3));
+            let preview = SESSION.with(|cell| cell.borrow().preview);
+            if let Some(preview) = preview {
+                unsafe {
+                    let _ = SetWindowPos(
+                        preview,
+                        None,
+                        frame.left,
+                        frame.top,
+                        frame.width().max(1),
+                        frame.height().max(1),
+                        SWP_NOACTIVATE | SWP_NOZORDER,
+                    );
+                }
+            }
+            if progress < 1.0 {
+                SESSION.with(|cell| {
+                    let mut session = cell.borrow_mut();
+                    if session.preview_animation.is_none()
+                        && session.preview_animation_generation == animation.generation
+                    {
+                        session.preview_animation = Some(animation);
+                    }
+                });
+            }
+        }
+    }
+    let animations = SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        session.animation_tick_active = true;
+        std::mem::take(&mut session.animations)
+    });
+    let mut unfinished = Vec::new();
+    for animation in animations {
+        if !animation_is_current(animation.window, animation.generation)
+            || !unsafe { IsWindow(Some(animation.window)).as_bool() }
+        {
+            continue;
+        }
+        if unsafe { IsHungAppWindow(animation.window).as_bool() } {
+            notify_error(host, "A window stopped responding during its animation.");
+            continue;
+        }
+        let mut process_id = 0;
+        unsafe {
+            GetWindowThreadProcessId(animation.window, Some(&mut process_id));
+        }
+        if process_id != animation.process_id
+            || history::identity_token(animation.window) != animation.history_token
+            || unsafe { GetPropW(animation.window, RECOVERY_PROPERTY).0 as usize }
+                != animation.recovery_token
+        {
+            continue;
+        }
+        let progress = (now.duration_since(animation.started).as_secs_f64()
+            / animation.duration.as_secs_f64())
+        .clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        let frame = interpolate_rect(animation.from, animation.to, eased);
+        if let Err(error) = position_visible_frame(animation.window, frame, Default::default()) {
+            notify_error(host, &error);
+            continue;
+        }
+        if !animation_is_current(animation.window, animation.generation) {
+            continue;
+        }
+        if progress >= 1.0 {
+            if let Err(error) =
+                set_visible_frame(animation.window, animation.to, Default::default())
+            {
+                notify_error(host, &error);
+            }
+            if !animation_is_current(animation.window, animation.generation) {
+                continue;
+            }
+            if let AnimationCompletion::Unstash { entry, focus } = animation.completion {
+                let result = restore_placement(entry.window, &entry.placement)
+                    .and_then(|()| clear_recovery(entry.window, false));
+                if let Err(error) = result {
+                    notify_error(
+                        host,
+                        &format!("cannot finish restoring stashed window: {error}"),
+                    );
+                } else if focus {
+                    let _ = unsafe { SetForegroundWindow(entry.window) };
+                }
+            }
+        } else {
+            unfinished.push(animation);
+        }
+    }
+    let active = SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        for animation in unfinished {
+            let current = session
+                .animation_versions
+                .iter()
+                .any(|(window, generation)| {
+                    *window == animation.window.0 as isize && *generation == animation.generation
+                });
+            if current
+                && !session
+                    .animations
+                    .iter()
+                    .any(|queued| queued.window == animation.window)
+            {
+                session.animations.push(animation);
+            }
+        }
+        session.animation_tick_active = false;
+        !session.animations.is_empty() || session.preview_animation.is_some()
+    });
+    if !active {
+        unsafe {
+            let _ = KillTimer(Some(host), ANIMATION_TIMER_ID);
+        }
+    }
 }
 
 fn apply_frame_action(hwnd: HWND, action: Action, settings: &Settings) -> Result<(), String> {
@@ -659,7 +1110,11 @@ fn apply_frame_action(hwnd: HWND, action: Action, settings: &Settings) -> Result
     }
     let target = target_frame(hwnd, action, settings)?;
     let old = rect_from_window(hwnd)?;
-    set_visible_frame(hwnd, target, Default::default())?;
+    if !settings.animate_window_resizes
+        || !start_window_animation(hwnd, old, target, settings, AnimationCompletion::None)?
+    {
+        set_visible_frame(hwnd, target, Default::default())?;
+    }
     if settings.move_cursor_with_window {
         let mut cursor = POINT::default();
         if unsafe { GetCursorPos(&mut cursor) }.is_ok() {
@@ -722,6 +1177,16 @@ fn execute_action(hwnd: HWND, action: Action, settings: &Settings) -> Result<(),
         ensure_target_identity(hwnd, settings)?;
     } else if action != Action::Unstash && !(action == Action::Undo && hwnd.0.is_null()) {
         ensure_target(hwnd, settings)?;
+    }
+    if !hwnd.0.is_null() {
+        break_shortcut_cycles_for_action(hwnd, action, settings);
+    }
+    if hwnd.0.is_null() && action == Action::Undo {
+        if let Some(target) = with_history(|history| Ok(history.last_window()))? {
+            cancel_window_animation(target);
+        }
+    } else {
+        cancel_window_animation(hwnd);
     }
     match action {
         Action::Undo => {
@@ -799,7 +1264,7 @@ fn execute_action(hwnd: HWND, action: Action, settings: &Settings) -> Result<(),
         | Action::MoveToMonitorRight
         | Action::MoveToMonitorUp
         | Action::MoveToMonitorDown => {
-            return move_to_monitor(hwnd, action);
+            return move_to_monitor(hwnd, action, settings);
         }
         Action::FocusLeft
         | Action::FocusRight
@@ -839,20 +1304,38 @@ fn stash(hwnd: HWND, action: Action, settings: &Settings) -> Result<(), String> 
     }
     with_history(|history| history.record(hwnd, before))?;
     let _tracked = track_recoverable_window(hwnd, before, false)?;
-    set_visible_frame(
-        hwnd,
-        Rect {
-            left: x,
-            top: y,
-            right: x.saturating_add(current.width()),
-            bottom: y.saturating_add(current.height()),
-        },
-        Default::default(),
-    )
-    .map_err(|error| {
+    let target = Rect {
+        left: x,
+        top: y,
+        right: x.saturating_add(current.width()),
+        bottom: y.saturating_add(current.height()),
+    };
+    let result = if settings.animate_stashed_windows {
+        start_window_animation(hwnd, current, target, settings, AnimationCompletion::None).and_then(
+            |animated| {
+                if animated {
+                    Ok(())
+                } else {
+                    set_visible_frame(hwnd, target, Default::default())
+                }
+            },
+        )
+    } else {
+        set_visible_frame(hwnd, target, Default::default())
+    };
+    result.map_err(|error| {
         let _ = clear_recovery(hwnd, false);
         format!("cannot stash window: {error}")
-    })
+    })?;
+    if settings.shift_focus_when_stashed
+        && let Err(error) = focus_window(hwnd, Action::FocusNextInStack, settings)
+    {
+        notify_error(
+            SESSION.with(|cell| cell.borrow().host).unwrap_or(hwnd),
+            &error,
+        );
+    }
+    Ok(())
 }
 
 fn unstash(settings: &Settings) -> Result<(), String> {
@@ -866,12 +1349,28 @@ fn unstash(settings: &Settings) -> Result<(), String> {
         return Err("stashed window identity changed and cannot be safely restored".into());
     }
     ensure_target_identity(entry.window, settings)?;
+    if settings.animate_stashed_windows && animations_allowed(settings) {
+        let from = rect_from_window(entry.window)?;
+        restore_placement(entry.window, &entry.placement)
+            .map_err(|error| format!("cannot restore stashed window: {error}"))?;
+        position_visible_frame(entry.window, from, Default::default())?;
+        if start_window_animation(
+            entry.window,
+            from,
+            entry.original_frame,
+            settings,
+            AnimationCompletion::Unstash {
+                entry: entry.clone(),
+                focus: true,
+            },
+        )? {
+            return Ok(());
+        }
+    }
     restore_placement(entry.window, &entry.placement)
         .map_err(|error| format!("cannot restore stashed window: {error}"))?;
     clear_recovery(entry.window, false)?;
-    if !unsafe { SetForegroundWindow(entry.window).as_bool() } {
-        return Err("window was restored, but Windows did not allow it to take focus".into());
-    }
+    let _ = unsafe { SetForegroundWindow(entry.window) };
     Ok(())
 }
 
@@ -953,7 +1452,7 @@ unsafe extern "system" fn collect_window(hwnd: HWND, data: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-fn move_to_monitor(hwnd: HWND, action: Action) -> Result<(), String> {
+fn move_to_monitor(hwnd: HWND, action: Action, settings: &Settings) -> Result<(), String> {
     let all = monitors();
     if all.is_empty() {
         return Err("no monitors are available".into());
@@ -968,7 +1467,7 @@ fn move_to_monitor(hwnd: HWND, action: Action) -> Result<(), String> {
         Action::NextMonitor => all[(index + 1) % all.len()],
         Action::PreviousMonitor => all[(index + all.len() - 1) % all.len()],
         _ => {
-            let center = current.work.center();
+            let center = effective_work_area(current, settings).center();
 
             all.iter()
                 .copied()
@@ -976,7 +1475,7 @@ fn move_to_monitor(hwnd: HWND, action: Action) -> Result<(), String> {
                     if monitor.handle == current.handle {
                         return None;
                     }
-                    let other = monitor.work.center();
+                    let other = effective_work_area(monitor, settings).center();
                     let dx = other.0 - center.0;
                     let dy = other.1 - center.1;
                     let (primary, secondary) = match action {
@@ -994,11 +1493,12 @@ fn move_to_monitor(hwnd: HWND, action: Action) -> Result<(), String> {
         }
     };
     let old = rect_from_window(hwnd)?;
-    let width = old.width().min(destination.work.width()).max(1);
-    let height = old.height().min(destination.work.height()).max(1);
+    let destination_work = effective_work_area(destination, settings);
+    let width = old.width().min(destination_work.width()).max(1);
+    let height = old.height().min(destination_work.height()).max(1);
     let center = old.center();
-    let x = (center.0 - width / 2).clamp(destination.work.left, destination.work.right - width);
-    let y = (center.1 - height / 2).clamp(destination.work.top, destination.work.bottom - height);
+    let x = (center.0 - width / 2).clamp(destination_work.left, destination_work.right - width);
+    let y = (center.1 - height / 2).clamp(destination_work.top, destination_work.bottom - height);
     let before = history::placement(hwnd)?;
     let target = Rect {
         left: x,
@@ -1020,6 +1520,7 @@ fn focus_window(hwnd: HWND, action: Action, settings: &Settings) -> Result<(), S
     }
     .map_err(|error| format!("cannot enumerate windows: {error}"))?;
     let target_rect = rect_from_window(hwnd)?;
+    let target_monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
     let origin = target_rect.center();
     let mut candidates = Vec::new();
     for (z_order, candidate) in windows.into_iter().enumerate() {
@@ -1027,6 +1528,11 @@ fn focus_window(hwnd: HWND, action: Action, settings: &Settings) -> Result<(), S
             || !unsafe { IsWindowVisible(candidate).as_bool() }
             || is_protected_window(candidate)
             || is_excluded(candidate, settings).unwrap_or(true)
+        {
+            continue;
+        }
+        if action == Action::FocusNextInStack
+            && unsafe { MonitorFromWindow(candidate, MONITOR_DEFAULTTONEAREST) } != target_monitor
         {
             continue;
         }
@@ -1145,8 +1651,7 @@ fn register_hotkeys(host: HWND, settings: &Settings) -> Result<Vec<ShortcutCycle
         cycles.push(ShortcutCycle {
             ids,
             actions: shortcut.actions.clone(),
-            next: 0,
-            last_press: None,
+            progress: Vec::new(),
         });
     }
     Ok(cycles)
@@ -1172,33 +1677,73 @@ fn register_shortcut_action(hwnd: HWND, id: i32) {
             let mut session = cell.borrow_mut();
             let timeout_ms = session.settings.cycle_timeout_ms;
             let cycle_backwards = session.settings.cycle_backwards_on_shift;
+            let cycle_restart = session.settings.cycle_restart;
             let settings = session.settings.clone();
             let index = session
                 .shortcuts
                 .iter()
                 .position(|cycle| cycle.ids.contains(&id))?;
             let now = Instant::now();
-            let cycle = &mut session.shortcuts[index];
-            if cycle
-                .last_press
-                .is_some_and(|last| now.duration_since(last).as_millis() > u128::from(timeout_ms))
-            {
-                cycle.next = 0;
+            let target = unsafe { GetForegroundWindow() };
+            if target.0.is_null() {
+                return None;
             }
+            let mut process_id = 0;
+            unsafe {
+                GetWindowThreadProcessId(target, Some(&mut process_id));
+            }
+            if process_id == 0 {
+                return None;
+            }
+            let token = history::identity_token(target);
+            if cycle_restart {
+                for (other_index, cycle) in session.shortcuts.iter_mut().enumerate() {
+                    if other_index != index {
+                        cycle.progress.retain(|progress| progress.window != target);
+                    }
+                }
+            }
+            let cycle = &mut session.shortcuts[index];
+            cycle.progress.retain(|progress| {
+                progress.window != target
+                    || (progress.process_id == process_id
+                        && progress.token == token
+                        && now.duration_since(progress.last_press).as_millis()
+                            <= u128::from(timeout_ms))
+            });
+            let progress_index = cycle
+                .progress
+                .iter()
+                .position(|progress| progress.window == target);
+            let next = progress_index.map_or(0, |index| cycle.progress[index].next);
             let reverse = cycle_backwards && cycle.ids.get(1) == Some(&id);
             let index = if reverse {
-                (cycle.next + cycle.actions.len() - 1) % cycle.actions.len()
+                (next + cycle.actions.len() - 1) % cycle.actions.len()
             } else {
-                cycle.next % cycle.actions.len()
+                next % cycle.actions.len()
             };
             let action = cycle.actions[index];
-            cycle.next = if reverse {
+            let next = if reverse {
                 index
             } else {
                 (index + 1) % cycle.actions.len()
             };
-            cycle.last_press = Some(now);
-            Some((unsafe { GetForegroundWindow() }, action, settings))
+            let progress = ShortcutProgress {
+                window: target,
+                process_id,
+                token,
+                next,
+                last_press: now,
+            };
+            if let Some(progress_index) = progress_index {
+                cycle.progress[progress_index] = progress;
+            } else {
+                cycle.progress.push(progress);
+            }
+            if cycle.progress.len() > 128 {
+                cycle.progress.remove(0);
+            }
+            Some((target, action, settings))
         })
         .unwrap_or_else(|| {
             (
@@ -1216,20 +1761,124 @@ fn register_shortcut_action(hwnd: HWND, id: i32) {
     let _ = hwnd;
 }
 
+fn reset_other_shortcut_cycles(active_id: i32) {
+    let target = unsafe { GetForegroundWindow() };
+    SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        if !session.settings.cycle_restart {
+            return;
+        }
+        for cycle in &mut session.shortcuts {
+            if !cycle.ids.contains(&active_id) {
+                cycle.progress.retain(|progress| progress.window != target);
+            }
+        }
+    });
+}
+
+fn break_shortcut_cycles_for_action(target: HWND, action: Action, settings: &Settings) {
+    if !settings.cycle_restart {
+        return;
+    }
+    let belongs_to_cycle = SESSION.with(|cell| {
+        cell.borrow()
+            .shortcuts
+            .iter()
+            .any(|cycle| cycle.actions.contains(&action))
+    });
+    if belongs_to_cycle {
+        return;
+    }
+    SESSION.with(|cell| {
+        for cycle in &mut cell.borrow_mut().shortcuts {
+            cycle.progress.retain(|progress| progress.window != target);
+        }
+    });
+}
+
 fn input_key_down(key: u16) -> bool {
     unsafe { GetAsyncKeyState(i32::from(key)) as u16 & 0x8000 != 0 }
 }
 
-fn trigger_held(hotkey: Hotkey) -> bool {
-    input_key_down(hotkey.key)
-        && (!hotkey.control
-            || unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0 })
-        && (!hotkey.alt || unsafe { GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000 != 0 })
-        && (!hotkey.shift || unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0 })
-        && (!hotkey.win || input_key_down(0x5B) || input_key_down(0x5C))
+fn modifier_held(left_vk: i32, right_vk: i32, generic_vk: i32, side: TriggerSide) -> bool {
+    match side {
+        TriggerSide::Either => input_key_down(generic_vk as u16),
+        TriggerSide::Left => input_key_down(left_vk as u16),
+        TriggerSide::Right => input_key_down(right_vk as u16),
+    }
 }
 
-fn begin_radial(host: HWND) {
+fn trigger_side_matches(hotkey: Hotkey, side: TriggerSide) -> bool {
+    (!hotkey.control || modifier_held(0xA2, 0xA3, i32::from(VK_CONTROL.0), side))
+        && (!hotkey.alt || modifier_held(0xA4, 0xA5, i32::from(VK_MENU.0), side))
+        && (!hotkey.shift || modifier_held(0xA0, 0xA1, i32::from(VK_SHIFT.0), side))
+        && (!hotkey.win || modifier_held(0x5B, 0x5C, 0x5B, side))
+}
+
+fn trigger_held(hotkey: Hotkey, side: TriggerSide) -> bool {
+    input_key_down(hotkey.key) && trigger_side_matches(hotkey, side)
+}
+
+fn double_tap_interval() -> std::time::Duration {
+    std::time::Duration::from_millis(u64::from(unsafe { GetDoubleClickTime() }.min(400)))
+}
+
+fn start_trigger(host: HWND, kind: TriggerKind, settings: &Settings) {
+    let delay = if kind == TriggerKind::MiddleMouse && !settings.middle_click_uses_delay {
+        0
+    } else {
+        settings.trigger_delay_ms
+    };
+    SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        session.trigger_kind = kind;
+        session.trigger_wait_double_tap = false;
+        session.trigger_started = Some(Instant::now());
+        session.trigger_pending = delay > 0;
+    });
+    if delay == 0 {
+        begin_radial(host, kind);
+    } else {
+        unsafe {
+            let _ = SetTimer(Some(host), TIMER_ID, 8, None);
+        }
+    }
+}
+
+fn start_or_complete_double_tap(host: HWND, kind: TriggerKind, settings: &Settings) {
+    if !settings.double_tap_to_trigger {
+        start_trigger(host, kind, settings);
+        return;
+    }
+    let now = Instant::now();
+    let completed = SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        let last = match kind {
+            TriggerKind::Keyboard => &mut session.last_trigger_key_release,
+            TriggerKind::MiddleMouse => &mut session.last_middle_release,
+        };
+        if last.is_some_and(|last| now.duration_since(last) <= double_tap_interval()) {
+            *last = None;
+            true
+        } else {
+            *last = None;
+            session.trigger_kind = kind;
+            session.trigger_wait_double_tap = true;
+            session.trigger_pending = true;
+            session.trigger_started = Some(now);
+            false
+        }
+    });
+    if completed {
+        start_trigger(host, kind, settings);
+    } else {
+        unsafe {
+            let _ = SetTimer(Some(host), TIMER_ID, 8, None);
+        }
+    }
+}
+
+fn begin_radial(host: HWND, kind: TriggerKind) {
     if SESSION.with(|cell| cell.borrow().open) {
         return;
     }
@@ -1279,7 +1928,9 @@ fn begin_radial(host: HWND) {
         session.selected_sector = None;
         session.open = true;
         session.trigger_pending = false;
-        session.trigger_started = None;
+        session.trigger_kind = kind;
+        session.trigger_wait_double_tap = false;
+        session.trigger_started = Some(Instant::now());
         session.overlay
     });
     if let Some(overlay) = overlay {
@@ -1296,7 +1947,7 @@ fn begin_radial(host: HWND) {
                 SWP_NOACTIVATE | SWP_NOZORDER,
             )
         };
-        if settings.radial_menu_visible {
+        if settings.radial_menu_visible && !settings.hide_on_no_selection {
             if let Err(error) =
                 crate::radial::draw_with_settings_and_sector(overlay, None, None, &settings, dpi)
             {
@@ -1359,6 +2010,12 @@ pub fn run() -> Result<(), String> {
         )
     }
     .map_err(|e| e.to_string())?;
+    TASKBAR_CREATED_MESSAGE.store(
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(w!("TaskbarCreated"))
+        },
+        Ordering::Release,
+    );
     let preview = unsafe {
         CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
@@ -1374,10 +2031,6 @@ pub fn run() -> Result<(), String> {
             Some(instance),
             None,
         )
-    }
-    .map_err(|e| e.to_string())?;
-    unsafe {
-        SetLayeredWindowAttributes(preview, COLORREF(0), settings.preview_opacity, LWA_ALPHA)
     }
     .map_err(|e| e.to_string())?;
     let overlay = unsafe {
@@ -1405,23 +2058,10 @@ pub fn run() -> Result<(), String> {
         session.host = Some(host);
         session.settings = settings.clone();
     });
-    let icon = class.hIcon;
-    let mut tray = NOTIFYICONDATAW {
-        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-        hWnd: host,
-        uID: 1,
-        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
-        uCallbackMessage: TRAY_MESSAGE,
-        hIcon: icon,
-        ..Default::default()
-    };
-    let tip: Vec<u16> = "Orbit - Ctrl+Alt+Space"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    tray.szTip[..tip.len()].copy_from_slice(&tip);
-    if !unsafe { Shell_NotifyIconW(NIM_ADD, &tray).as_bool() } {
-        return Err("cannot create notification icon".into());
+    MIDDLE_CLICK_ENABLED.store(settings.middle_click_triggers, Ordering::Release);
+    SESSION.with(|cell| cell.borrow_mut().tray_icon = Some(class.hIcon));
+    if !settings.hide_tray_icon {
+        set_tray_icon(host, true)?;
     }
     if let Some(error) = recovery_error.as_deref() {
         notify_error(host, error);
@@ -1430,7 +2070,7 @@ pub fn run() -> Result<(), String> {
         Ok(shortcuts) => shortcuts,
         Err(error) => {
             unsafe {
-                let _ = Shell_NotifyIconW(NIM_DELETE, &tray);
+                let _ = set_tray_icon(host, false);
                 let _ = DestroyWindow(overlay);
                 let _ = DestroyWindow(preview);
                 let _ = DestroyWindow(host);
@@ -1447,7 +2087,7 @@ pub fn run() -> Result<(), String> {
                 HOOK_HOST.store(0, Ordering::Relaxed);
                 unregister_hotkeys(host);
                 unsafe {
-                    let _ = Shell_NotifyIconW(NIM_DELETE, &tray);
+                    let _ = set_tray_icon(host, false);
                     let _ = DestroyWindow(overlay);
                     let _ = DestroyWindow(preview);
                     let _ = DestroyWindow(host);
@@ -1484,13 +2124,12 @@ pub fn run() -> Result<(), String> {
     unregister_hotkeys(host);
     let _ = unsafe { KillTimer(Some(host), UPDATE_TIMER_ID) };
     HOOK_HOST.store(0, Ordering::Relaxed);
+    MIDDLE_CLICK_ENABLED.store(false, Ordering::Release);
     let _ = unsafe { UnhookWindowsHookEx(mouse_hook) };
     if let Err(error) = restore_recoverable_on_exit() {
         notify_error(host, &error);
     }
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_DELETE, &tray);
-    }
+    let _ = set_tray_icon(host, false);
     let _ = unsafe { DestroyWindow(overlay) };
     let _ = unsafe { DestroyWindow(preview) };
     let history = SESSION.with(|cell| std::mem::take(&mut cell.borrow_mut().history));
@@ -1602,6 +2241,7 @@ fn track_recoverable_window(
     placement: WINDOWPLACEMENT,
     hidden: bool,
 ) -> Result<StashedWindow, String> {
+    let original_frame = rect_from_window(hwnd)?;
     let mut pid = 0;
     unsafe {
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
@@ -1622,6 +2262,7 @@ fn track_recoverable_window(
         process_id: pid,
         token,
         hidden,
+        original_frame,
     };
     SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
@@ -1710,6 +2351,12 @@ fn recover_after_crash() -> Result<(), String> {
                 process_id: entry.process_id,
                 token: entry.token,
                 hidden: entry.hidden,
+                original_frame: Rect {
+                    left: entry.placement.normal_position.left,
+                    top: entry.placement.normal_position.top,
+                    right: entry.placement.normal_position.right,
+                    bottom: entry.placement.normal_position.bottom,
+                },
             };
             if entry.hidden {
                 session.hidden.push(window);
@@ -1831,9 +2478,14 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
+        message if message != 0 && message == TASKBAR_CREATED_MESSAGE.load(Ordering::Acquire) => {
+            restore_tray_after_explorer_restart(hwnd);
+            LRESULT(0)
+        }
         WM_CLOSE => {
             if SESSION.with(|cell| cell.borrow().host == Some(hwnd)) {
                 finish_session(hwnd, false);
+                cancel_all_animations();
                 if let Err(error) = restore_recoverable_on_exit() {
                     notify_error(hwnd, &error);
                 } else {
@@ -1946,50 +2598,57 @@ unsafe extern "system" fn window_proc(
             if SESSION.with(|cell| cell.borrow().open || cell.borrow().trigger_pending) {
                 return LRESULT(0);
             }
-            let delay = SESSION.with(|cell| cell.borrow().settings.trigger_delay_ms);
-            if delay == 0 {
-                begin_radial(hwnd);
-            } else {
-                SESSION.with(|cell| {
-                    let mut session = cell.borrow_mut();
-                    session.trigger_pending = true;
-                    session.trigger_started = Some(Instant::now());
-                });
-                unsafe {
-                    let _ = SetTimer(Some(hwnd), TIMER_ID, 8, None);
-                }
+            let settings = SESSION.with(|cell| cell.borrow().settings.clone());
+            if trigger_side_matches(settings.trigger, settings.trigger_side) {
+                start_or_complete_double_tap(hwnd, TriggerKind::Keyboard, &settings);
             }
             LRESULT(0)
         }
         WM_HOTKEY => {
+            reset_other_shortcut_cycles(wparam.0 as i32);
             register_shortcut_action(hwnd, wparam.0 as i32);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_ID => {
-            let (pending, opened, trigger, delay, start) = SESSION.with(|cell| {
-                let session = cell.borrow();
-                (
-                    session.trigger_pending,
-                    session.open,
-                    session.settings.trigger,
-                    session.settings.trigger_delay_ms,
-                    session.trigger_started,
-                )
-            });
+            let (pending, opened, trigger, side, delay, start, kind, waiting_double, timeout) =
+                SESSION.with(|cell| {
+                    let session = cell.borrow();
+                    (
+                        session.trigger_pending,
+                        session.open,
+                        session.settings.trigger,
+                        session.settings.trigger_side,
+                        session.settings.trigger_delay_ms,
+                        session.trigger_started,
+                        session.trigger_kind,
+                        session.trigger_wait_double_tap,
+                        session.settings.trigger_timeout_ms,
+                    )
+                });
             if pending {
-                if !trigger_held(trigger) {
+                let held = match kind {
+                    TriggerKind::Keyboard => trigger_held(trigger, side),
+                    TriggerKind::MiddleMouse => input_key_down(0x04),
+                };
+                if !held {
                     SESSION.with(|cell| {
                         let mut session = cell.borrow_mut();
                         session.trigger_pending = false;
                         session.trigger_started = None;
+                        if waiting_double && kind == TriggerKind::Keyboard {
+                            session.last_trigger_key_release = Some(Instant::now());
+                        } else if waiting_double && kind == TriggerKind::MiddleMouse {
+                            session.last_middle_release = Some(Instant::now());
+                        }
                     });
                     unsafe {
                         let _ = KillTimer(Some(hwnd), TIMER_ID);
                     }
-                } else if start
-                    .is_some_and(|instant| instant.elapsed().as_millis() >= u128::from(delay))
+                } else if !waiting_double
+                    && start
+                        .is_some_and(|instant| instant.elapsed().as_millis() >= u128::from(delay))
                 {
-                    begin_radial(hwnd);
+                    begin_radial(hwnd, kind);
                 }
                 return LRESULT(0);
             }
@@ -2002,13 +2661,23 @@ unsafe extern "system" fn window_proc(
                 return LRESULT(0);
             }
             let settings = SESSION.with(|cell| cell.borrow().settings.clone());
+            let timed_out = timeout > 0
+                && SESSION
+                    .with(|cell| cell.borrow().trigger_started)
+                    .is_some_and(|started| started.elapsed().as_millis() >= u128::from(timeout));
+            if timed_out {
+                finish_session(hwnd, true);
+                return LRESULT(0);
+            }
             if !settings.disable_cursor_interaction {
                 let mut point = POINT::default();
                 if unsafe { GetCursorPos(&mut point) }.is_ok() {
                     select_radial_cursor(hwnd, (point.x, point.y));
                 }
             }
-            if !trigger_held(settings.trigger) {
+            if SESSION.with(|cell| cell.borrow().trigger_kind) == TriggerKind::Keyboard
+                && !trigger_held(settings.trigger, settings.trigger_side)
+            {
                 finish_session(hwnd, true);
             }
             LRESULT(0)
@@ -2017,6 +2686,10 @@ unsafe extern "system" fn window_proc(
             if SESSION.with(|cell| cell.borrow().settings.updates_enabled) {
                 let _ = start_update_check(hwnd, false);
             }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == ANIMATION_TIMER_ID => {
+            advance_window_animations(hwnd);
             LRESULT(0)
         }
         DRAG_EVENT_MESSAGE => {
@@ -2148,10 +2821,28 @@ fn select_radial_cursor(hwnd: HWND, cursor: (i32, i32)) {
         }
         session.selected_sector = sector;
         session.selected = next;
+        session.trigger_started = Some(Instant::now());
         true
     });
     if changed {
         redraw_radial(hwnd);
+        let (overlay, visible, hide_no_selection) = SESSION.with(|cell| {
+            let session = cell.borrow();
+            (
+                session.overlay,
+                session.settings.radial_menu_visible,
+                session.settings.hide_on_no_selection,
+            )
+        });
+        if let Some(overlay) = overlay {
+            unsafe {
+                if hide_no_selection && next.is_none() {
+                    let _ = ShowWindow(overlay, SW_HIDE);
+                } else if visible {
+                    let _ = ShowWindow(overlay, SW_SHOWNOACTIVATE);
+                }
+            }
+        }
         update_preview();
     }
 }
@@ -2196,6 +2887,7 @@ fn handle_wheel_event(host: HWND, delta: i32) {
         let sector = (current + step).rem_euclid(8) as usize;
         session.selected_sector = Some(sector);
         session.selected = Some(session.settings.radial_actions[sector]);
+        session.trigger_started = Some(Instant::now());
         Some(())
     });
     if changed.is_some() {
@@ -2228,8 +2920,43 @@ fn snap_action_at(point: POINT, threshold: i32) -> Option<Action> {
 fn handle_drag_event(host: HWND, event: HookMouseEvent) {
     let point = event.point;
     match event.message {
+        WM_MBUTTONDOWN => {
+            let settings = SESSION.with(|cell| cell.borrow().settings.clone());
+            if settings.middle_click_triggers
+                && !SESSION.with(|cell| cell.borrow().open || cell.borrow().trigger_pending)
+            {
+                start_or_complete_double_tap(host, TriggerKind::MiddleMouse, &settings);
+            }
+        }
+        WM_MBUTTONUP => {
+            let (open, pending, wait_double, kind) = SESSION.with(|cell| {
+                let session = cell.borrow();
+                (
+                    session.open,
+                    session.trigger_pending,
+                    session.trigger_wait_double_tap,
+                    session.trigger_kind,
+                )
+            });
+            if pending && kind == TriggerKind::MiddleMouse {
+                SESSION.with(|cell| {
+                    let mut session = cell.borrow_mut();
+                    session.trigger_pending = false;
+                    session.trigger_started = None;
+                    if wait_double {
+                        session.last_middle_release = Some(Instant::now());
+                    }
+                });
+                unsafe {
+                    let _ = KillTimer(Some(host), TIMER_ID);
+                }
+            } else if open && kind == TriggerKind::MiddleMouse {
+                finish_session(host, true);
+            }
+        }
         WM_LBUTTONDOWN => {
-            if !SESSION.with(|cell| cell.borrow().settings.snap_on_drag) {
+            let settings = SESSION.with(|cell| cell.borrow().settings.clone());
+            if !settings.snap_on_drag && !settings.restore_window_frame_on_drag {
                 return;
             }
             let under = unsafe { WindowFromPoint(point) };
@@ -2238,20 +2965,25 @@ fn handle_drag_event(host: HWND, event: HookMouseEvent) {
             }
             let root = unsafe { GetAncestor(under, GA_ROOT) };
             let target = if root.0.is_null() { under } else { root };
-            let settings = SESSION.with(|cell| cell.borrow().settings.clone());
             if ensure_target(target, &settings).is_err() {
                 return;
             }
+            cancel_window_animation(target);
             let mut frame = RECT::default();
             if unsafe { GetWindowRect(target, &mut frame) }.is_err() {
                 return;
             }
+            let Ok(start_visible) = rect_from_window(target) else {
+                return;
+            };
             SESSION.with(|cell| {
                 cell.borrow_mut().drag = Some(DragState {
                     window: target,
                     start_cursor: point,
                     last_cursor: point,
                     start_frame: frame,
+                    start_visible,
+                    restore_frame: settings.restore_window_frame_on_drag,
                     candidate: None,
                 })
             });
@@ -2283,23 +3015,44 @@ fn handle_drag_event(host: HWND, event: HookMouseEvent) {
                     notify_error(host, &error);
                 }
             }
-            let Some((window, start, frame, threshold)) = SESSION.with(|cell| {
-                let session = cell.borrow();
-                let drag = session.drag.as_ref()?;
-                Some((
-                    drag.window,
-                    drag.start_cursor,
-                    drag.start_frame,
-                    session.settings.snap_threshold,
-                ))
-            }) else {
+            let Some((window, start, frame, start_visible, restore_frame, snap, threshold)) =
+                SESSION.with(|cell| {
+                    let session = cell.borrow();
+                    let drag = session.drag.as_ref()?;
+                    Some((
+                        drag.window,
+                        drag.start_cursor,
+                        drag.start_frame,
+                        drag.start_visible,
+                        drag.restore_frame,
+                        session.settings.snap_on_drag,
+                        session.settings.snap_threshold,
+                    ))
+                })
+            else {
                 return;
             };
             let mut current = RECT::default();
             let moved = unsafe { GetWindowRect(window, &mut current) }.is_ok()
                 && ((current.left - frame.left).abs() >= 4 || (current.top - frame.top).abs() >= 4)
                 && ((point.x - start.x).abs() >= 4 || (point.y - start.y).abs() >= 4);
-            let candidate = if moved {
+            if moved
+                && restore_frame
+                && let Ok(current_visible) = rect_from_window(window)
+                && (current_visible.width() != start_visible.width()
+                    || current_visible.height() != start_visible.height())
+            {
+                let restored = Rect {
+                    left: current_visible.left,
+                    top: current_visible.top,
+                    right: current_visible.left.saturating_add(start_visible.width()),
+                    bottom: current_visible.top.saturating_add(start_visible.height()),
+                };
+                if let Err(error) = set_visible_frame(window, restored, Default::default()) {
+                    notify_error(host, &error);
+                }
+            }
+            let candidate = if moved && snap {
                 snap_action_at(point, threshold)
             } else {
                 None
@@ -2333,9 +3086,12 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, message: WPARAM, details: L
     if code == HC_ACTION as i32 && details.0 != 0 {
         let data = unsafe { &*(details.0 as *const MSLLHOOKSTRUCT) };
         let event = message.0 as u32;
+        let wants_middle = MIDDLE_CLICK_ENABLED.load(Ordering::Acquire)
+            && matches!(event, WM_MBUTTONDOWN | WM_MBUTTONUP);
         let (wants_drag_event, wants_wheel, wants_radial_release) = SESSION.with(|cell| {
             let session = cell.borrow();
-            let wants_drag = session.settings.snap_on_drag;
+            let wants_drag =
+                session.settings.snap_on_drag || session.settings.restore_window_frame_on_drag;
             (
                 wants_drag && matches!(event, WM_LBUTTONDOWN | WM_LBUTTONUP)
                     || event == WM_MOUSEMOVE
@@ -2346,7 +3102,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, message: WPARAM, details: L
                 event == WM_LBUTTONUP && session.open,
             )
         });
-        if wants_drag_event || wants_wheel || wants_radial_release {
+        if wants_drag_event || wants_wheel || wants_radial_release || wants_middle {
             let host = HOOK_HOST.load(Ordering::Relaxed);
             if host != 0 {
                 if wants_wheel {
@@ -2391,6 +3147,9 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, message: WPARAM, details: L
                     }
                 }
             }
+            if wants_middle {
+                return LRESULT(1);
+            }
         }
     }
     unsafe { CallNextHookEx(None, code, message, details) }
@@ -2419,6 +3178,60 @@ fn notify_error(host: HWND, message: &str) {
     data.szInfo[..info_len].copy_from_slice(&info[..info_len]);
     unsafe {
         let _ = Shell_NotifyIconW(windows::Win32::UI::Shell::NIM_MODIFY, &data);
+    }
+}
+
+fn tray_data(host: HWND, icon: HICON) -> NOTIFYICONDATAW {
+    let mut data = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: host,
+        uID: 1,
+        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        uCallbackMessage: TRAY_MESSAGE,
+        hIcon: icon,
+        ..Default::default()
+    };
+    let tip: Vec<u16> = "Orbit window manager"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    data.szTip[..tip.len()].copy_from_slice(&tip);
+    data
+}
+
+fn set_tray_icon(host: HWND, visible: bool) -> Result<(), String> {
+    let (installed, icon) = SESSION.with(|cell| {
+        let session = cell.borrow();
+        (session.tray_installed, session.tray_icon)
+    });
+    if installed == visible {
+        return Ok(());
+    }
+    let icon = icon.ok_or("Orbit tray icon is unavailable")?;
+    let data = tray_data(host, icon);
+    let operation = if visible { NIM_ADD } else { NIM_DELETE };
+    if !unsafe { Shell_NotifyIconW(operation, &data).as_bool() } {
+        return Err(if visible {
+            "cannot create notification icon"
+        } else {
+            "cannot remove notification icon"
+        }
+        .into());
+    }
+    SESSION.with(|cell| cell.borrow_mut().tray_installed = visible);
+    Ok(())
+}
+
+fn restore_tray_after_explorer_restart(host: HWND) {
+    let (visible, icon) = SESSION.with(|cell| {
+        let session = cell.borrow();
+        (!session.settings.hide_tray_icon, session.tray_icon)
+    });
+    if visible && let Some(icon) = icon {
+        let data = tray_data(host, icon);
+        if unsafe { Shell_NotifyIconW(NIM_ADD, &data).as_bool() } {
+            SESSION.with(|cell| cell.borrow_mut().tray_installed = true);
+        }
     }
 }
 
@@ -2598,6 +3411,7 @@ pub fn reload_settings() -> Result<(), String> {
         return Ok(());
     };
     finish_session(host, false);
+    cancel_all_animations();
     SESSION.with(|cell| cell.borrow_mut().drag = None);
     unregister_hotkeys(host);
     let shortcuts = match register_hotkeys(host, &next) {
@@ -2615,11 +3429,21 @@ pub fn reload_settings() -> Result<(), String> {
             };
         }
     };
+    if let Err(error) = set_tray_icon(host, !next.hide_tray_icon) {
+        unregister_hotkeys(host);
+        let restored = register_hotkeys(host, &previous);
+        let _ = set_tray_icon(host, !previous.hide_tray_icon);
+        if let Ok(shortcuts) = restored {
+            SESSION.with(|cell| cell.borrow_mut().shortcuts = shortcuts);
+        }
+        return Err(error);
+    }
     SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
         session.settings = next.clone();
         session.shortcuts = shortcuts;
     });
+    MIDDLE_CLICK_ENABLED.store(next.middle_click_triggers, Ordering::Release);
     unsafe {
         let _ = KillTimer(Some(host), UPDATE_TIMER_ID);
     }
@@ -2688,41 +3512,156 @@ fn update_preview() {
         .map(|frame| frame.inset(settings.preview_padding));
     if let Some(preview) = preview {
         if let Some(frame) = frame {
+            let (width, height) = (frame.width().max(1), frame.height().max(1));
+            let dpi = selection
+                .map(|(target, _)| unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(target) })
+                .unwrap_or(96)
+                .max(96);
+            let accent = settings.use_system_accent.then(system_accent_rgb).flatten();
+            let mut render_settings = settings.clone();
+            if settings.preview_use_window_corner_radius {
+                // Windows has no public API for reading another process window's actual radius;
+                // use the documented rounded-corner preference's standard 8-DIP radius.
+                render_settings.preview_corner_radius = 8;
+            }
+            let style = PreviewStyleKey {
+                width,
+                height,
+                dpi,
+                accent: accent.unwrap_or(settings.accent_color),
+                gradient: settings.gradient_color,
+                opacity: settings.preview_opacity,
+                border: settings.preview_border_thickness,
+                radius: render_settings.preview_corner_radius,
+                use_gradient: settings.use_gradient,
+            };
+            let cached = SESSION
+                .with(|cell| cell.borrow().preview_bitmap_cache.clone())
+                .filter(|(cached_key, _)| *cached_key == style);
+            let bitmap = match cached {
+                Some((_, bitmap)) => Ok(bitmap),
+                None => {
+                    let bitmap = crate::preview::render_bitmap_with_colors(
+                        &render_settings,
+                        selection
+                            .map(|(_, action)| action)
+                            .unwrap_or(Action::NoAction),
+                        (width as u32, height as u32),
+                        dpi,
+                        accent,
+                    );
+                    bitmap.map(|bitmap| {
+                        let bitmap = Arc::new(bitmap);
+                        SESSION.with(|cell| {
+                            cell.borrow_mut().preview_bitmap_cache = Some((style, bitmap.clone()))
+                        });
+                        bitmap
+                    })
+                }
+            };
+            let was_visible = unsafe { IsWindowVisible(preview).as_bool() };
+            let mut initial = frame;
+            if !was_visible {
+                let (anchor_x, anchor_y) = match settings.preview_start {
+                    orbit::settings::PreviewStart::ScreenCenter => {
+                        let bounds = selection
+                            .and_then(|(target, _)| {
+                                monitor_info(unsafe {
+                                    MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST)
+                                })
+                                .ok()
+                            })
+                            .map(|monitor| monitor.full)
+                            .unwrap_or(frame);
+                        bounds.center()
+                    }
+                    orbit::settings::PreviewStart::RadialMenu => {
+                        SESSION.with(|cell| cell.borrow().origin)
+                    }
+                    orbit::settings::PreviewStart::ActionCenter => frame.center(),
+                };
+                initial.left = anchor_x.saturating_sub(width / 2);
+                initial.top = anchor_y.saturating_sub(height / 2);
+                initial.right = initial.left.saturating_add(width);
+                initial.bottom = initial.top.saturating_add(height);
+                SESSION.with(|cell| {
+                    let mut session = cell.borrow_mut();
+                    session.preview_animation_generation =
+                        session.preview_animation_generation.wrapping_add(1).max(1);
+                    session.preview_animation = None;
+                });
+            } else {
+                SESSION.with(|cell| {
+                    let mut session = cell.borrow_mut();
+                    session.preview_animation_generation =
+                        session.preview_animation_generation.wrapping_add(1).max(1);
+                    session.preview_animation = None;
+                });
+            }
             unsafe {
-                let _ = SetLayeredWindowAttributes(
-                    preview,
-                    COLORREF(0),
-                    settings.preview_opacity,
-                    LWA_ALPHA,
-                );
                 let _ = SetWindowPos(
                     preview,
                     None,
-                    frame.left,
-                    frame.top,
-                    frame.width(),
-                    frame.height(),
+                    initial.left,
+                    initial.top,
+                    width,
+                    height,
                     SWP_NOACTIVATE | SWP_NOZORDER,
                 );
-                let radius = (settings.preview_corner_radius as i32)
-                    .min(frame.width().min(frame.height()) / 2);
-                let region = windows::Win32::Graphics::Gdi::CreateRoundRectRgn(
-                    0,
-                    0,
-                    frame.width() + 1,
-                    frame.height() + 1,
-                    radius * 2,
-                    radius * 2,
+                let corner = if settings.preview_use_window_corner_radius {
+                    DWMWCP_ROUND
+                } else {
+                    windows::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
+                };
+                let _ = DwmSetWindowAttribute(
+                    preview,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    (&corner as *const windows::Win32::Graphics::Dwm::DWM_WINDOW_CORNER_PREFERENCE)
+                        .cast::<std::ffi::c_void>(),
+                    std::mem::size_of_val(&corner) as u32,
                 );
-                if !region.0.is_null()
-                    && windows::Win32::Graphics::Gdi::SetWindowRgn(preview, Some(region), true) == 0
-                {
-                    let _ = DeleteObject(HGDIOBJ(region.0));
-                }
-                let _ = InvalidateRect(Some(preview), None, false);
                 let _ = ShowWindow(preview, SW_SHOWNOACTIVATE);
             }
+            match bitmap.and_then(|bitmap| crate::preview::update_layered_window(preview, &bitmap))
+            {
+                Ok(()) => {}
+                Err(error) => {
+                    if let Some(host) = SESSION.with(|cell| cell.borrow().host) {
+                        notify_error(host, &error);
+                    }
+                }
+            }
+            if !was_visible && initial != frame && animations_allowed(&settings) {
+                let duration =
+                    std::time::Duration::from_millis(u64::from(settings.animation_duration_ms));
+                let generation = SESSION.with(|cell| {
+                    let mut session = cell.borrow_mut();
+                    session.preview_animation_generation =
+                        session.preview_animation_generation.wrapping_add(1).max(1);
+                    let generation = session.preview_animation_generation;
+                    session.preview_animation = Some(PreviewAnimation {
+                        from: initial,
+                        to: frame,
+                        started: Instant::now(),
+                        duration,
+                        generation,
+                    });
+                    generation
+                });
+                let _ = generation;
+                if let Some(host) = SESSION.with(|cell| cell.borrow().host) {
+                    unsafe {
+                        let _ = SetTimer(Some(host), ANIMATION_TIMER_ID, 16, None);
+                    }
+                }
+            }
         } else {
+            SESSION.with(|cell| {
+                let mut session = cell.borrow_mut();
+                session.preview_animation = None;
+                session.preview_animation_generation =
+                    session.preview_animation_generation.wrapping_add(1).max(1);
+            });
             unsafe {
                 let _ = ShowWindow(preview, SW_HIDE);
             }
@@ -2762,16 +3701,8 @@ fn action_has_preview(action: Action) -> bool {
 
 fn paint_preview(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
-    let dc = unsafe { BeginPaint(hwnd, &mut ps) };
-    let mut area = RECT::default();
-    let color = SESSION.with(|cell| cell.borrow().settings.accent_color);
-    let colorref = ((color >> 16) & 0xff) | (color & 0xff00) | ((color & 0xff) << 16);
-    let brush = unsafe { CreateSolidBrush(COLORREF(colorref)) };
+    unsafe { BeginPaint(hwnd, &mut ps) };
     unsafe {
-        if GetClientRect(hwnd, &mut area).is_ok() {
-            FillRect(dc, &area, brush);
-        }
-        let _ = DeleteObject(HGDIOBJ(brush.0));
         let _ = EndPaint(hwnd, &ps);
     }
 }
@@ -2798,6 +3729,43 @@ mod tests {
         fn drop(&mut self) {
             let _ = unsafe { DestroyWindow(self.0) };
         }
+    }
+
+    #[test]
+    fn edge_padding_uses_measured_monitor_size_threshold() {
+        let mut settings = Settings::default();
+        settings.edge_padding = Some(orbit::settings::EdgePadding {
+            top: 10,
+            right: 20,
+            bottom: 30,
+            left: 40,
+        });
+        settings.padding_minimum_screen_inches = 24.0;
+        let monitor = Monitor {
+            handle: HMONITOR(std::ptr::null_mut()),
+            work: Rect {
+                left: -100,
+                top: 20,
+                right: 900,
+                bottom: 820,
+            },
+            full: Rect::default(),
+            physical_inches: Some(23.9),
+        };
+        assert_eq!(effective_work_area(monitor, &settings), monitor.work);
+        let monitor = Monitor {
+            physical_inches: Some(24.1),
+            ..monitor
+        };
+        assert_eq!(
+            effective_work_area(monitor, &settings),
+            Rect {
+                left: -60,
+                top: 30,
+                right: 880,
+                bottom: 790
+            }
+        );
     }
 
     #[test]

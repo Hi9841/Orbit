@@ -90,14 +90,15 @@ fn frame(window: HWND) -> (i32, i32, i32, i32) {
     (rect.left, rect.top, rect.right, rect.bottom)
 }
 
-fn capture(name: &str) {
+fn capture(name: &str, window: Option<HWND>) {
     let Some(directory) = std::env::var_os("ORBIT_DESKTOP_CAPTURE") else {
         return;
     };
     use std::os::windows::process::CommandExt;
     std::fs::create_dir_all(&directory).unwrap();
     let output = std::path::PathBuf::from(directory).join(format!("{name}.png"));
-    let mut process = Command::new("powershell.exe")
+    let mut command = Command::new("powershell.exe");
+    command
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -106,9 +107,21 @@ fn capture(name: &str) {
             "-Output",
         ])
         .arg(output)
-        .creation_flags(0x08000000)
-        .spawn()
-        .unwrap();
+        .creation_flags(0x08000000);
+    if let Some(window) = window {
+        let (left, top, right, bottom) = frame(window);
+        command.args([
+            "-Left",
+            &left.to_string(),
+            "-Top",
+            &top.to_string(),
+            "-Width",
+            &(right - left).to_string(),
+            "-Height",
+            &(bottom - top).to_string(),
+        ]);
+    }
+    let mut process = command.spawn().unwrap();
     wait_for(|| process.try_wait().unwrap().is_some());
     assert!(process.wait().unwrap().success());
 }
@@ -171,7 +184,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     // Keep network and cosmetic inset out of the geometry assertions.
     std::fs::write(
         config.path().join("Orbit/settings.json"),
-        br#"{"version":1,"preview_padding":0,"updates_enabled":false}"#,
+        br#"{"version":1,"preview_padding":0,"updates_enabled":false,"animate_window_resizes":true,"animate_stashed_windows":true,"animation_duration_ms":120}"#,
     )
     .unwrap();
     let foreground = unsafe { GetForegroundWindow() };
@@ -274,7 +287,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         area.bottom,
     );
     wait_for(|| frame(preview) == expected);
-    capture("radial-preview");
+    capture("radial-preview", None);
     key_event(VK_ESCAPE, false);
     eprintln!("native workflow: cancel radial");
     wait_for(|| !unsafe { IsWindowVisible(overlay).as_bool() });
@@ -294,8 +307,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         key_event(key, true);
     }
     wait_for(|| !unsafe { IsWindowVisible(overlay).as_bool() });
-    wait_for(|| frame(target) != original);
-    assert_eq!(frame(target), expected);
+    wait_for(|| frame(target) == expected);
     for key in [VK_CONTROL, VK_MENU, VIRTUAL_KEY(u16::from(b'Z'))] {
         key_event(key, false);
     }
@@ -340,7 +352,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     let settings = unsafe { FindWindowW(w!("OrbitSettings"), None) }.unwrap();
     let sidebar = unsafe { GetDlgItem(Some(settings), 10) }.unwrap();
     let count = unsafe { SendMessageW(sidebar, LB_GETCOUNT, None, None) }.0;
-    assert!(count >= 7, "settings pages are missing");
+    assert_eq!(count, 8, "settings pages are missing");
     for index in 0..count {
         unsafe {
             SendMessageW(sidebar, LB_SETCURSEL, Some(WPARAM(index as usize)), None);
@@ -355,8 +367,29 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         let painted = Instant::now() + Duration::from_millis(100);
         wait_for(|| Instant::now() >= painted);
         eprintln!("native workflow: settings page {index}");
-        capture(&format!("settings-{index}"));
+        capture(&format!("settings-{index}"), Some(settings));
     }
+    eprintln!("native workflow: save settings and confirm persistence");
+    unsafe {
+        SendMessageW(settings, WM_COMMAND, Some(WPARAM(14)), None);
+    }
+    wait_for(|| {
+        std::fs::read(config.path().join("Orbit/settings.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|value| value.get("gradient_color").is_some())
+    });
+    let saved: orbit::settings::Settings =
+        serde_json::from_slice(&std::fs::read(config.path().join("Orbit/settings.json")).unwrap())
+            .unwrap();
+    saved.validate().unwrap();
+    assert!(saved.animate_window_resizes && saved.animate_stashed_windows);
+    assert!(!saved.updates_enabled);
+    assert_eq!(saved.preview_padding, 0);
+    assert_eq!(
+        saved.preview_opacity,
+        orbit::settings::Settings::default().preview_opacity
+    );
     unsafe { PostMessageW(Some(host), WM_CLOSE, Default::default(), Default::default()) }.unwrap();
     eprintln!("native workflow: quit resident");
     wait_for(|| guard.child.try_wait().unwrap().is_some());

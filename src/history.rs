@@ -37,6 +37,11 @@ pub fn placement(window: HWND) -> Result<WINDOWPLACEMENT, String> {
     Ok(value)
 }
 
+/// Stable per-window token used to reject animation or recovery work after HWND reuse.
+pub fn identity_token(window: HWND) -> usize {
+    unsafe { GetPropW(window, PROPERTY) }.0 as usize
+}
+
 impl History {
     pub fn capture_initial(&mut self, window: HWND) -> Result<(), String> {
         let mut token = unsafe { GetPropW(window, PROPERTY) }.0 as usize;

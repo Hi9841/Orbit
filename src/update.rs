@@ -43,6 +43,15 @@ impl Manifest {
     }
 
     pub fn verify(&self, public_key_base64: &str, current_version: &str) -> Result<bool, String> {
+        self.verify_channel(public_key_base64, current_version, false)
+    }
+
+    pub fn verify_channel(
+        &self,
+        public_key_base64: &str,
+        current_version: &str,
+        include_development: bool,
+    ) -> Result<bool, String> {
         let key_bytes = STANDARD
             .decode(public_key_base64)
             .map_err(|_| "invalid update public key")?;
@@ -63,7 +72,7 @@ impl Manifest {
         }
         let offered = Version::parse(&self.version).map_err(|_| "invalid update version")?;
         let current = Version::parse(current_version).map_err(|_| "invalid current version")?;
-        if !offered.pre.is_empty() && current.pre.is_empty() {
+        if !include_development && !offered.pre.is_empty() && current.pre.is_empty() {
             return Ok(false);
         }
         Ok(offered > current)
@@ -105,9 +114,70 @@ fn client() -> ureq::Agent {
 }
 
 pub fn check() -> Result<Option<Manifest>, String> {
+    let include_development = crate::settings::Settings::load()?.include_development_versions;
+    check_channel(include_development)
+}
+
+pub fn check_channel(include_development: bool) -> Result<Option<Manifest>, String> {
     let Some((url, key)) = configured() else {
         return Ok(None);
     };
+    if include_development && let Some(feed) = option_env!("ORBIT_DEVELOPMENT_RELEASES_URL") {
+        #[derive(Deserialize)]
+        struct Release {
+            draft: bool,
+            assets: Vec<Asset>,
+        }
+        #[derive(Deserialize)]
+        struct Asset {
+            name: String,
+            browser_download_url: String,
+        }
+        validate_url(feed)?;
+        let response = client()
+            .get(feed)
+            .timeout(Duration::from_secs(30))
+            .call()
+            .map_err(|e| format!("development update check failed: {e}"))?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() > 1024 * 1024 {
+            return Err("release listing is too large".into());
+        }
+        let releases: Vec<Release> =
+            serde_json::from_slice(&bytes).map_err(|e| format!("invalid release listing: {e}"))?;
+        let mut best: Option<Manifest> = None;
+        for asset in releases
+            .into_iter()
+            .filter(|release| !release.draft)
+            .flat_map(|release| release.assets)
+            .filter(|asset| asset.name == "update.json")
+            .take(5)
+        {
+            if let Some(manifest) = fetch_manifest(&asset.browser_download_url, key, true)?
+                && best.as_ref().is_none_or(|old| {
+                    Version::parse(&manifest.version).unwrap()
+                        > Version::parse(&old.version).unwrap()
+                })
+            {
+                best = Some(manifest);
+            }
+        }
+        return Ok(best);
+    }
+    fetch_manifest(url, key, include_development)
+}
+
+fn fetch_manifest(
+    url: &str,
+    key: &str,
+    include_development: bool,
+) -> Result<Option<Manifest>, String> {
+    validate_url(url)?;
     let response = match client().get(url).timeout(Duration::from_secs(30)).call() {
         Ok(response) => response,
         // GitHub has no latest-release asset until the first stable release exists.
@@ -126,7 +196,7 @@ pub fn check() -> Result<Option<Manifest>, String> {
     }
     let manifest: Manifest =
         serde_json::from_slice(&bytes).map_err(|e| format!("invalid update manifest: {e}"))?;
-    if manifest.verify(key, env!("CARGO_PKG_VERSION"))? {
+    if manifest.verify_channel(key, env!("CARGO_PKG_VERSION"), include_development)? {
         Ok(Some(manifest))
     } else {
         Ok(None)
@@ -137,7 +207,11 @@ pub fn download(manifest: &Manifest) -> Result<PathBuf, String> {
     let Some((_, key)) = configured() else {
         return Err("updates are not configured".into());
     };
-    if !manifest.verify(key, env!("CARGO_PKG_VERSION"))? {
+    if !manifest.verify_channel(
+        key,
+        env!("CARGO_PKG_VERSION"),
+        crate::settings::Settings::load()?.include_development_versions,
+    )? {
         return Err("update is not newer".into());
     }
     let directory = crate::settings::Settings::path()?
@@ -204,7 +278,11 @@ fn copy_verified(
 /// Recheck the exact staged file immediately before handing it to Windows.
 pub fn verify_download(path: &Path, manifest: &Manifest) -> Result<(), String> {
     let (_, key) = configured().ok_or("updates are not configured")?;
-    if !manifest.verify(key, env!("CARGO_PKG_VERSION"))? {
+    if !manifest.verify_channel(
+        key,
+        env!("CARGO_PKG_VERSION"),
+        crate::settings::Settings::load()?.include_development_versions,
+    )? {
         return Err("update is not newer".into());
     }
     let mut source =
@@ -315,6 +393,7 @@ mod tests {
                 .to_bytes(),
         );
         assert!(!manifest.verify(&public_key, "0.1.0").unwrap());
+        assert!(manifest.verify_channel(&public_key, "0.1.0", true).unwrap());
         assert!(manifest.verify(&public_key, "0.2.0-beta.1").unwrap());
     }
 }

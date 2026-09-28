@@ -4,7 +4,9 @@
 
 On 2026-09-28, `cargo test --locked --all-targets` passed 32 tests, with three desktop tests explicitly ignored. Formatting and Clippy with warnings denied passed. The radial bitmap was inspected offscreen at 96 and 144 DPI. PE inspection confirmed an x64 Windows GUI executable without a Visual C++ redistributable import.
 
-The current final installer has been compiled, but its interactive lifecycle has not been rerun locally. Earlier installer checks predate the expanded runtime. No Windows 10/11 clean-machine, screen-reader, mixed-DPI interaction, or published update acceptance result is claimed.
+Hosted verification of baseline commit `181de83` passed in [run 36415646672](https://github.com/Hi9841/Orbit/actions/runs/36415646672). It built the installer and corresponding source, inspected the PE, installed, launched, quit, reinstalled, updated a running copy, verified restart, and uninstalled with settings retained and deleted. The native tests also passed real placement, history, radial preview, cancellation, commit, undo, settings opening, and quit.
+
+These results cover the baseline commit. Expanded 0.2.0 options require another run against their final commit. No Windows 10/11 clean-machine, screen-reader, mixed-DPI interaction, or published version-upgrade acceptance result is claimed.
 
 ## Background checks
 
@@ -29,11 +31,11 @@ cargo test --bin orbit -- --ignored --test-threads=1
 ./tools/Test-Installer.ps1
 ```
 
-The installer test refuses to run when it detects existing Orbit settings, an installed copy, or a resident process. It uses a workspace install path and verifies per-user registration, launch, quit, reinstall, settings preservation, explicit settings deletion, and uninstall registration removal.
+The installer test refuses to run when it detects existing Orbit settings, an installed copy, or a resident process. It uses a workspace install path and verifies per-user registration, launch, quit, reinstall, running-update handoff, exactly one restarted instance, running uninstall, settings preservation, explicit settings deletion, and uninstall registration removal.
 
 The manually dispatched packaging workflow runs that installer test on a disposable GitHub-hosted Windows runner. This does not open anything on the developer's desktop. Hosted Windows Server results do not replace Windows 10/11 and mixed-DPI acceptance checks.
 
-The native workflow test creates a disposable target, uses real key events, checks preview geometry, cancels, commits, undoes, opens settings, and exits. It restores the pointer and previous foreground window when it finishes.
+The native workflow test creates a disposable target, uses real key events, checks preview geometry, cancels, commits, undoes, stashes and restores through resident IPC, and tests hidden-window recovery after forced termination. It visits each settings pane and exits. It restores the pointer and previous foreground window when it finishes. Hosted runs capture the actual radial preview and settings panes; local runs never capture the desktop automatically.
 
 ## Release acceptance
 

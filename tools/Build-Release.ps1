@@ -85,13 +85,21 @@ directory = "vendor"
         $sourceZip = Join-Path $dist "Orbit-$version-source.zip"
         if (Test-Path -LiteralPath $sourceZip) { Remove-Item -LiteralPath $sourceZip }
         Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $sourceZip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+        $archive = [System.IO.Compression.ZipFile]::Open($sourceZip, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($file in Get-ChildItem -LiteralPath $stage -File -Recurse -Force) {
+                $entryName = $file.FullName.Substring($stage.Length + 1).Replace('\', '/')
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+            }
+        } finally { $archive.Dispose() }
         # The stage contains only copies created by this invocation and is inside .tools.
         $allowedRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot '.tools')) + [System.IO.Path]::DirectorySeparatorChar
         if (-not ([System.IO.Path]::GetFullPath($stage).StartsWith($allowedRoot, [System.StringComparison]::OrdinalIgnoreCase))) { throw 'Unexpected source staging path' }
         Remove-Item -LiteralPath $stage -Recurse -Force
     }
-    $checksums = Get-ChildItem -LiteralPath $dist -File | Where-Object { $_.Extension -in '.exe','.zip' } | Sort-Object Name | ForEach-Object {
+    $releaseFiles = @($installer, (Join-Path $dist 'THIRD-PARTY-NOTICES.txt'))
+    if (-not $SkipSourceArchive) { $releaseFiles += $sourceZip }
+    $checksums = $releaseFiles | ForEach-Object { Get-Item -LiteralPath $_ } | Sort-Object Name | ForEach-Object {
         '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name
     }
     [System.IO.File]::WriteAllLines((Join-Path $dist 'SHA256SUMS.txt'), $checksums)

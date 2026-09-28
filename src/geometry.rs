@@ -34,6 +34,21 @@ impl Rect {
             bottom: self.bottom.saturating_sub(p),
         }
     }
+    /// Inset a work area independently on each edge while retaining at least one pixel.
+    pub fn inset_edges(self, top: i32, right: i32, bottom: i32, left: i32) -> Self {
+        let width = self.width().max(1);
+        let height = self.height().max(1);
+        let left = left.max(0).min(width - 1);
+        let right = right.max(0).min(width - 1 - left);
+        let top = top.max(0).min(height - 1);
+        let bottom = bottom.max(0).min(height - 1 - top);
+        Self {
+            left: self.left.saturating_add(left),
+            top: self.top.saturating_add(top),
+            right: self.right.saturating_sub(right),
+            bottom: self.bottom.saturating_sub(bottom),
+        }
+    }
     fn columns(self, parts: i32, first: i32, count: i32) -> Self {
         let x = |n| {
             (i64::from(self.left) + i64::from(self.width()) * i64::from(n) / i64::from(parts))
@@ -722,6 +737,29 @@ mod tests {
         let right = Action::RightHalf.frame(B, B, 0);
         assert_eq!(left.right, right.left);
         assert_eq!(left.width() + right.width(), B.width());
+    }
+
+    #[test]
+    fn edge_padding_preserves_offset_and_never_inverts_small_work_areas() {
+        let padded = B.inset_edges(10, 20, 30, 40);
+        assert_eq!(
+            padded,
+            Rect {
+                left: -60,
+                top: 30,
+                right: 881,
+                bottom: 791
+            }
+        );
+        let narrow = Rect {
+            left: -2,
+            top: 5,
+            right: 0,
+            bottom: 6,
+        }
+        .inset_edges(50, 50, 50, 50);
+        assert_eq!(narrow.width(), 1);
+        assert_eq!(narrow.height(), 1);
     }
 
     #[test]

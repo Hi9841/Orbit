@@ -19,14 +19,17 @@ fn run() -> Result<(), String> {
     }
     if args == ["--help"] {
         println!(
-            "Orbit release signing\nUsage:\n  orbit-release keygen SECRET_FILE\n  orbit-release sign INPUT_MANIFEST OUTPUT_MANIFEST\nThe sign command reads ORBIT_UPDATE_SIGNING_SEED as a base64 32-byte seed."
+            "Orbit release signing\nUsage:\n  orbit-release keygen SECRET_FILE\n  orbit-release sign INPUT_MANIFEST OUTPUT_MANIFEST\n  orbit-release verify MANIFEST INSTALLER\nThe sign command reads ORBIT_UPDATE_SIGNING_SEED as a base64 32-byte seed. Verification uses the embedded public key."
         );
         return Ok(());
     }
     match args.as_slice() {
         [command, path] if command == "keygen" => keygen(Path::new(path)),
         [command, input, output] if command == "sign" => sign(Path::new(input), Path::new(output)),
-        _ => Err("expected keygen SECRET_FILE or sign INPUT_MANIFEST OUTPUT_MANIFEST".into()),
+        [command, manifest, installer] if command == "verify" => {
+            verify(Path::new(manifest), Path::new(installer))
+        }
+        _ => Err("expected keygen SECRET_FILE, sign INPUT_MANIFEST OUTPUT_MANIFEST, or verify MANIFEST INSTALLER".into()),
     }
 }
 
@@ -58,6 +61,12 @@ fn sign(input: &Path, output: &Path) -> Result<(), String> {
         .try_into()
         .map_err(|_| "signing seed must be 32 bytes")?;
     let key = SigningKey::from_bytes(&seed);
+    let expected = orbit::update::configured()
+        .ok_or("release verification key is not configured")?
+        .1;
+    if STANDARD.encode(key.verifying_key().to_bytes()) != expected {
+        return Err("signing seed does not match the public key embedded in Orbit".into());
+    }
     let data = fs::read(input).map_err(|e| format!("cannot read manifest: {e}"))?;
     let mut manifest: Manifest =
         serde_json::from_slice(&data).map_err(|e| format!("invalid manifest: {e}"))?;
@@ -88,5 +97,30 @@ fn sign(input: &Path, output: &Path) -> Result<(), String> {
         manifest.version,
         output.display()
     );
+    Ok(())
+}
+
+fn verify(manifest_path: &Path, installer: &Path) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let data = fs::read(manifest_path).map_err(|e| e.to_string())?;
+    let manifest: Manifest = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+    let (_, key) =
+        orbit::update::configured().ok_or("release verification key is not configured")?;
+    manifest.verify_channel(key, "0.0.0", true)?;
+    let mut file = fs::File::open(installer).map_err(|e| e.to_string())?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 65536];
+    loop {
+        let count = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    if hex::encode(digest.finalize()) != manifest.sha256.to_ascii_lowercase() {
+        return Err("installer does not match signed metadata".into());
+    }
+    println!("status: verified\nversion: {}", manifest.version);
     Ok(())
 }

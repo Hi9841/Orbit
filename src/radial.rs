@@ -1,6 +1,6 @@
 use orbit::geometry::{Action, Rect};
 use orbit::settings::Settings;
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, SIZE};
+use windows::Win32::Foundation::{COLORREF, HWND, SIZE};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HGDIOBJ,
@@ -31,10 +31,21 @@ pub fn window_size_px(settings: &Settings, dpi: u32) -> i32 {
 
 /// Render an action selection without creating a window. If the same action is assigned to
 /// multiple directions, each matching direction is highlighted.
+#[cfg(test)]
 pub fn render_bitmap(
     settings: &Settings,
     selected: Option<Action>,
     dpi: u32,
+) -> Result<RadialBitmap, String> {
+    render_bitmap_with_colors(settings, selected, dpi, None)
+}
+
+/// Render with an optional OS-resolved accent color while remaining independent of the desktop.
+pub fn render_bitmap_with_colors(
+    settings: &Settings,
+    selected: Option<Action>,
+    dpi: u32,
+    system_accent: Option<u32>,
 ) -> Result<RadialBitmap, String> {
     let mut selected_slots = [false; 8];
     if let Some(action) = selected {
@@ -42,7 +53,7 @@ pub fn render_bitmap(
             selected_slots[slot] = *candidate == action;
         }
     }
-    render(settings, selected, selected_slots, dpi)
+    render(settings, selected, selected_slots, dpi, system_accent)
 }
 
 /// Render one selected direction without creating a window.
@@ -60,7 +71,7 @@ pub fn render_bitmap_for_sector(
         selected_slots[sector] = true;
     }
     let selected = selected_sector.map(|sector| settings.radial_actions[sector]);
-    render(settings, selected, selected_slots, dpi)
+    render(settings, selected, selected_slots, dpi, None)
 }
 
 /// Draw the radial overlay as a premultiplied BGRA layered bitmap.
@@ -70,7 +81,8 @@ pub fn draw_with_settings(
     settings: &Settings,
     dpi: u32,
 ) -> Result<(), String> {
-    let bitmap = render_bitmap(settings, selected, dpi)?;
+    let bitmap =
+        render_bitmap_with_colors(settings, selected, dpi, runtime_system_accent(settings))?;
     update_layered_window(window, bitmap)
 }
 
@@ -90,7 +102,13 @@ pub fn draw_with_settings_and_sector(
     if let Some(sector) = selected_sector {
         selected_slots[sector] = true;
     }
-    let bitmap = render(settings, selected_action, selected_slots, dpi)?;
+    let bitmap = render(
+        settings,
+        selected_action,
+        selected_slots,
+        dpi,
+        runtime_system_accent(settings),
+    )?;
     update_layered_window(window, bitmap)
 }
 
@@ -99,6 +117,7 @@ fn render(
     selected_action: Option<Action>,
     selected_slots: [bool; 8],
     dpi: u32,
+    system_accent: Option<u32>,
 ) -> Result<RadialBitmap, String> {
     let dpi = dpi.max(48);
     let size = window_size_px(settings, dpi);
@@ -110,11 +129,16 @@ fn render(
     let inner = (outer - thickness).max(0.0);
     let outer_corner = (f64::from(settings.radial_corner_radius) * scale).min(outer);
     let inner_corner = (outer_corner - thickness).max(0.0).min(inner);
-    let selected_color = [
-        ((settings.accent_color >> 16) & 0xff) as f64,
-        ((settings.accent_color >> 8) & 0xff) as f64,
-        (settings.accent_color & 0xff) as f64,
-    ];
+    let accent = (if settings.use_system_accent {
+        system_accent.unwrap_or(settings.accent_color)
+    } else {
+        settings.accent_color
+    }) & 0x00ff_ffff;
+    let gradient = if settings.use_gradient {
+        settings.gradient_color & 0x00ff_ffff
+    } else {
+        accent
+    };
     let pixel_count = usize::try_from(size)
         .ok()
         .and_then(|value| value.checked_mul(value))
@@ -134,6 +158,7 @@ fn render(
             let mut alpha = ring_coverage * 240.0;
 
             if let Some(action) = selected_action {
+                let selected_color = interpolate_rgb(accent, gradient, dx / (2.0 * outer) + 0.5);
                 let angle = dy.atan2(dx);
                 let slot_count = settings.radial_actions.len() as f64;
                 for (slot, selected) in selected_slots.iter().enumerate() {
@@ -156,7 +181,12 @@ fn render(
 
                 // Keep the center glyph independent of ring coverage; it is visible in the
                 // transparent center and still reflects the selected frame.
-                if let Some(glyph) = glyph_pixel(x, y, center, scale, action, selected_color) {
+                let glyph_color = interpolate_rgb(
+                    accent,
+                    gradient,
+                    (f64::from(x) + 0.5 - center + outer) / (2.0 * outer),
+                );
+                if let Some(glyph) = glyph_pixel(x, y, center, scale, action, glyph_color) {
                     color = glyph.0;
                     alpha = glyph.1;
                 }
@@ -167,6 +197,20 @@ fn render(
     }
 
     Ok(RadialBitmap { size, pixels })
+}
+
+fn runtime_system_accent(settings: &Settings) -> Option<u32> {
+    if !settings.use_system_accent {
+        return None;
+    }
+    #[cfg(not(test))]
+    {
+        crate::platform::system_accent_rgb()
+    }
+    #[cfg(test)]
+    {
+        None
+    }
 }
 
 fn update_layered_window(window: HWND, bitmap: RadialBitmap) -> Result<(), String> {
@@ -219,7 +263,7 @@ fn update_layered_window(window: HWND, bitmap: RadialBitmap) -> Result<(), Strin
             None,
             Some(&SIZE { cx: size, cy: size }),
             Some(dc),
-            Some(&POINT::default()),
+            None,
             COLORREF(0),
             Some(&BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
@@ -241,7 +285,11 @@ fn rounded_box_distance(x: f64, y: f64, half_width: f64, half_height: f64, radiu
     let radius = radius.min(half_width).min(half_height);
     let qx = x.abs() - half_width + radius;
     let qy = y.abs() - half_height + radius;
-    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius
+    if qx > 0.0 && qy > 0.0 {
+        qx.hypot(qy) - radius
+    } else {
+        qx.max(qy) - radius
+    }
 }
 
 fn glyph_pixel(
@@ -289,6 +337,16 @@ fn premultiplied_bgra(color: [f64; 3], alpha: f64) -> u32 {
     (alpha << 24) | (channel(color[0]) << 16) | (channel(color[1]) << 8) | channel(color[2])
 }
 
+fn interpolate_rgb(first: u32, second: u32, position: f64) -> [f64; 3] {
+    let t = position.clamp(0.0, 1.0);
+    let channel = |shift: u32| {
+        let a = f64::from((first >> shift) & 0xffu32);
+        let b = f64::from((second >> shift) & 0xffu32);
+        a + (b - a) * t
+    };
+    [channel(16), channel(8), channel(0)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +390,24 @@ mod tests {
         assert_eq!(at(&bitmap, 130, 90) & 0x00ff_ffff, 0x0067_c1d6);
         assert_ne!(at(&bitmap, 90, 80) >> 24, 0);
         assert!(render_bitmap_for_sector(&settings, Some(8), 96).is_err());
+    }
+
+    #[test]
+    fn gradient_and_system_accent_are_resolved_before_premultiplication() {
+        let settings = Settings {
+            use_system_accent: true,
+            use_gradient: true,
+            accent_color: 0x000000,
+            gradient_color: 0xffffff,
+            radial_actions: [Action::LeftHalf; 8],
+            ..Settings::default()
+        };
+        let bitmap =
+            render_bitmap_with_colors(&settings, Some(Action::LeftHalf), 96, Some(0xff0000))
+                .unwrap();
+        let left = at(&bitmap, 60, 90) & 0x00ff_ffff;
+        let right = at(&bitmap, 120, 90) & 0x00ff_ffff;
+        assert_ne!(left, right);
+        assert_eq!(left & 0x00ff_0000, 0x00ff_0000);
     }
 }

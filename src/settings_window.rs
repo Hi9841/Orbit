@@ -1,16 +1,19 @@
 use crate::{configuration, platform};
 use orbit::geometry::Action;
-use orbit::settings::{CustomFrame, Hotkey, Settings, Shortcut};
+use orbit::settings::{
+    CustomFrame, EdgePadding, Hotkey, PreviewStart, Settings, Shortcut, TriggerSide,
+};
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, CreateRectRgn,
-    DEFAULT_CHARSET, DEFAULT_PITCH, DeleteObject, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD,
-    GetMonitorInfoW, HBRUSH, HFONT, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow, OUT_DEFAULT_PRECIS, SetWindowRgn,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, ClientToScreen, CreateFontW,
+    CreateRectRgn, DEFAULT_CHARSET, DEFAULT_PITCH, DeleteObject, FF_DONTCARE, FW_NORMAL,
+    FW_SEMIBOLD, GetMonitorInfoW, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, OUT_DEFAULT_PRECIS, SetBkMode,
+    SetWindowRgn, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::Dialogs::{
@@ -19,7 +22,7 @@ use windows::Win32::UI::Controls::Dialogs::{
 };
 use windows::Win32::UI::Controls::SetScrollInfo;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON,
     CB_ADDSTRING, CB_GETCURSEL, CB_GETITEMDATA, CB_SETCURSEL, CB_SETITEMDATA, CBS_DROPDOWNLIST,
@@ -28,13 +31,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_ARROW, IDI_APPLICATION, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LBN_SELCHANGE,
     LBS_NOTIFY, LoadCursorW, LoadIconW, MSG, RegisterClassW, SW_SHOW, SendMessageW,
     SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_SETFONT, WM_SIZE, WNDCLASSW,
-    WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_KEYDOWN, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GW_CHILD, GW_HWNDNEXT, GetScrollInfo, GetWindow, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN,
-    SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_VERT, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE,
-    SIF_TRACKPOS, SW_HIDE, SW_SHOWNA, WM_MOUSEWHEEL, WM_VSCROLL,
+    GW_CHILD, GW_HWNDNEXT, GetScrollInfo, GetWindow, GetWindowRect, IsChild, SB_LINEDOWN,
+    SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_VERT, SCROLLINFO,
+    SIF_PAGE, SIF_POS, SIF_RANGE, SIF_TRACKPOS, SW_HIDE, SW_SHOWNA, WM_MOUSEWHEEL, WM_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -72,6 +76,7 @@ const BEHAVIOR_REVERSE_SCROLL: i32 = 1028;
 const BEHAVIOR_LAUNCH_LOGIN: i32 = 1029;
 const BEHAVIOR_UPDATES_ENABLED: i32 = 1030;
 const BEHAVIOR_TRIGGER_ERROR: i32 = 1031;
+const BEHAVIOR_LOCK_CENTER: i32 = 1032;
 
 const RADIAL_VISIBLE: i32 = 1100;
 const RADIAL_SIZE: i32 = 1101;
@@ -79,12 +84,17 @@ const RADIAL_THICKNESS: i32 = 1102;
 const RADIAL_CORNER: i32 = 1103;
 const RADIAL_COLOR: i32 = 1104;
 const RADIAL_ERROR: i32 = 1105;
+const RADIAL_SYSTEM_ACCENT: i32 = 1110;
+const RADIAL_GRADIENT: i32 = 1111;
+const RADIAL_GRADIENT_COLOR: i32 = 1112;
 const RADIAL_ACTION_BASE: i32 = 1120;
 
 const PREVIEW_VISIBLE: i32 = 1200;
 const PREVIEW_OPACITY: i32 = 1201;
 const PREVIEW_PADDING: i32 = 1202;
 const PREVIEW_CORNER: i32 = 1203;
+const PREVIEW_BORDER: i32 = 1204;
+const PREVIEW_WINDOW_CORNERS: i32 = 1205;
 
 const SHORTCUTS_ERROR: i32 = 1301;
 const SHORTCUT_LIST: i32 = 1302;
@@ -114,6 +124,31 @@ const EXCLUSIONS_TEXT: i32 = 1500;
 const ABOUT_UPDATE: i32 = 1600;
 const ABOUT_STATUS: i32 = 1601;
 
+const ADV_GROUP_PLACEMENT: i32 = 1800;
+const ADV_GROUP_INPUT: i32 = 1801;
+const ADV_EDGE_ENABLED: i32 = 1802;
+const ADV_EDGE_TOP: i32 = 1803;
+const ADV_EDGE_RIGHT: i32 = 1804;
+const ADV_EDGE_BOTTOM: i32 = 1805;
+const ADV_EDGE_LEFT: i32 = 1806;
+const ADV_MIN_SCREEN_INCHES: i32 = 1807;
+const ADV_ANIMATE_WINDOWS: i32 = 1808;
+const ADV_ANIMATE_STASHED: i32 = 1809;
+const ADV_ANIMATION_DURATION: i32 = 1810;
+const ADV_RESTORE_ON_DRAG: i32 = 1811;
+const ADV_SHIFT_FOCUS_STASHED: i32 = 1812;
+const ADV_IGNORE_LOW_POWER: i32 = 1813;
+const ADV_PREVIEW_START: i32 = 1814;
+const ADV_CYCLE_RESTART: i32 = 1815;
+const ADV_TRIGGER_SIDE: i32 = 1816;
+const ADV_DOUBLE_TAP: i32 = 1817;
+const ADV_MIDDLE_CLICK: i32 = 1818;
+const ADV_MIDDLE_DELAY: i32 = 1819;
+const ADV_TRIGGER_TIMEOUT: i32 = 1820;
+const ADV_HIDE_NO_SELECTION: i32 = 1821;
+const ADV_HIDE_TRAY: i32 = 1822;
+const ADV_DEV_RELEASES: i32 = 1823;
+
 const ACTION_LABEL_BASE: i32 = 3000;
 const FIELD_ERROR_BASE: i32 = 4000;
 const ACTION_COUNT: usize = 8;
@@ -127,13 +162,14 @@ const RADIAL_DIRECTIONS: [&str; ACTION_COUNT] = [
     "Top",
     "Top right",
 ];
-const PAGE_NAMES: [&str; 7] = [
+const PAGE_NAMES: [&str; 8] = [
     "General & behavior",
     "Radial menu",
     "Preview",
     "Shortcuts",
     "Custom frames",
     "Exclusions",
+    "Advanced",
     "About & updates",
 ];
 
@@ -233,9 +269,75 @@ pub fn open() -> Result<(), String> {
 }
 
 pub fn handle_dialog_message(message: &MSG) -> bool {
-    WINDOW.with(Cell::get).is_some_and(|hwnd| unsafe {
-        windows::Win32::UI::WindowsAndMessaging::IsDialogMessageW(hwnd, message).as_bool()
+    WINDOW.with(Cell::get).is_some_and(|hwnd| {
+        if message.message == WM_KEYDOWN && unsafe { GetKeyState(0x11) } < 0 {
+            match message.wParam.0 {
+                0x21 => {
+                    scroll_page(hwnd, SB_PAGEUP.0);
+                    return true;
+                }
+                0x22 => {
+                    scroll_page(hwnd, SB_PAGEDOWN.0);
+                    return true;
+                }
+                0x24 => {
+                    set_scroll_offset(hwnd, 0);
+                    return true;
+                }
+                0x23 => {
+                    set_scroll_offset(hwnd, i32::MAX);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        let handled = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::IsDialogMessageW(hwnd, message).as_bool()
+        };
+        if handled && message.message == WM_KEYDOWN {
+            ensure_focused_control_visible(hwnd);
+        }
+        handled
     })
+}
+
+fn ensure_focused_control_visible(hwnd: HWND) {
+    let focus = unsafe { GetFocus() };
+    if focus.0.is_null() || !unsafe { IsChild(hwnd, focus) }.as_bool() {
+        return;
+    }
+    let mut control_rect = RECT::default();
+    let mut client_origin = POINT::default();
+    if unsafe { GetWindowRect(focus, &mut control_rect) }.is_err()
+        || !unsafe { ClientToScreen(hwnd, &mut client_origin) }.as_bool()
+    {
+        return;
+    }
+    let dpi = dpi_for_window(hwnd);
+    let (_, height) = client_size_logical(hwnd);
+    let viewport_top = px(108, dpi);
+    let viewport_bottom = px(height - 112, dpi);
+    let control_left = control_rect.left - client_origin.x;
+    if control_left < px(220, dpi) {
+        return;
+    }
+    let control_top = control_rect.top - client_origin.y;
+    let control_bottom = control_rect.bottom - client_origin.y;
+    let delta = if control_top < viewport_top {
+        control_top - viewport_top
+    } else if control_bottom > viewport_bottom {
+        control_bottom - viewport_bottom
+    } else {
+        return;
+    };
+    let logical_delta = ((i64::from(delta) * 96) / i64::from(dpi)) as i32;
+    let current = STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map_or(0, |state| state.scroll_offset)
+    });
+    set_scroll_offset(hwnd, current + logical_delta);
 }
 
 unsafe extern "system" fn settings_proc(
@@ -266,6 +368,13 @@ unsafe extern "system" fn settings_proc(
             let page = STATE.with(|state| state.borrow().as_ref().map_or(0, |state| state.page));
             layout_page(hwnd, page);
             LRESULT(0)
+        }
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+            let hdc = HDC(wparam.0 as *mut _);
+            unsafe {
+                let _ = SetBkMode(hdc, TRANSPARENT);
+            }
+            LRESULT(HBRUSH((COLOR_WINDOW.0 + 1) as usize as *mut _).0 as isize)
         }
         WM_DPICHANGED => {
             if lparam.0 != 0 {
@@ -313,6 +422,11 @@ unsafe extern "system" fn settings_proc(
                 SHORTCUT_ACTION_ADD => add_shortcut_action(hwnd),
                 SHORTCUT_ACTION_REMOVE => remove_shortcut_action(hwnd),
                 SHORTCUT_APPLY => apply_shortcut_editor(hwnd),
+                RADIAL_SYSTEM_ACCENT => update_radial_color_enabled(hwnd),
+                RADIAL_GRADIENT => update_gradient_enabled(hwnd),
+                ADV_EDGE_ENABLED => update_edge_padding_enabled(hwnd),
+                ADV_ANIMATE_WINDOWS | ADV_ANIMATE_STASHED => update_animation_enabled(hwnd),
+                ADV_MIDDLE_CLICK => update_middle_click_delay_enabled(hwnd),
                 FRAME_NEW => new_frame(hwnd),
                 FRAME_DELETE => delete_frame(hwnd),
                 FRAME_APPLY => apply_frame_editor(hwnd),
@@ -482,13 +596,14 @@ fn fit_window_to_work_area(hwnd: HWND, desired_width: i32, desired_height: i32) 
 
 fn content_extent(page: usize, height: i32) -> i32 {
     match page {
-        0 => (height - 220).max(338),
+        0 => (height - 220).max(474),
         3 => (height - 220).max(430),
         4 => (height - 220).max(404),
         5 => (height - 220).max(296),
-        1 => (height - 212).max(438),
-        2 => 300,
-        6 => 238,
+        1 => (height - 212).max(450),
+        2 => (height - 220).max(370),
+        6 => (height - 220).max(520),
+        7 => 238,
         _ => 0,
     }
 }
@@ -684,7 +799,7 @@ fn create_text(parent: HWND, id: i32, text: &str) -> Result<HWND, String> {
         parent,
         w!("STATIC"),
         PCWSTR(wide.as_ptr()),
-        WINDOW_STYLE(0),
+        WINDOW_STYLE(0x80), // SS_NOPREFIX: show literal ampersands in labels and page names.
         id,
     )
 }
@@ -804,7 +919,8 @@ fn build_page(hwnd: HWND, page: usize) -> Result<(), String> {
         3 => build_shortcuts(hwnd, &settings)?,
         4 => build_custom_frames(hwnd, &settings)?,
         5 => build_exclusions(hwnd, &settings)?,
-        6 => build_about(hwnd)?,
+        6 => build_advanced(hwnd, &settings)?,
+        7 => build_about(hwnd)?,
         _ => return Err("unknown settings page".into()),
     }
     layout_page(hwnd, page);
@@ -889,6 +1005,12 @@ fn build_behavior(hwnd: HWND, settings: &Settings) -> Result<(), String> {
         BEHAVIOR_DISABLE_CURSOR,
         "Disable radial cursor interaction",
         settings.disable_cursor_interaction,
+    )?;
+    create_checkbox(
+        hwnd,
+        BEHAVIOR_LOCK_CENTER,
+        "Keep the radial menu centered on its target",
+        settings.lock_radial_menu_to_center,
     )?;
 
     create_group(hwnd, 1701, "Trigger and timing")?;
@@ -979,6 +1101,28 @@ fn build_radial(hwnd: HWND, settings: &Settings) -> Result<(), String> {
     let color = format!("#{:06X}", settings.accent_color & 0x00ff_ffff);
     create_edit(hwnd, RADIAL_COLOR, &color, false)?;
     create_text(hwnd, field_error_id(RADIAL_COLOR), "")?;
+    create_checkbox(
+        hwnd,
+        RADIAL_SYSTEM_ACCENT,
+        "Use Windows accent color",
+        settings.use_system_accent,
+    )?;
+    create_checkbox(
+        hwnd,
+        RADIAL_GRADIENT,
+        "Use a color gradient",
+        settings.use_gradient,
+    )?;
+    create_text(
+        hwnd,
+        RADIAL_GRADIENT_COLOR + 1000,
+        "Gradient end color (#RRGGBB)",
+    )?;
+    let gradient_color = format!("#{:06X}", settings.gradient_color & 0x00ff_ffff);
+    create_edit(hwnd, RADIAL_GRADIENT_COLOR, &gradient_color, false)?;
+    create_text(hwnd, field_error_id(RADIAL_GRADIENT_COLOR), "")?;
+    update_radial_color_enabled(hwnd);
+    update_gradient_enabled(hwnd);
     let options = action_options(settings);
     for (slot, direction) in RADIAL_DIRECTIONS.iter().enumerate() {
         let id = RADIAL_ACTION_BASE + slot as i32;
@@ -1011,7 +1155,7 @@ fn build_preview(hwnd: HWND, settings: &Settings) -> Result<(), String> {
     create_numeric(
         hwnd,
         PREVIEW_OPACITY,
-        "Preview opacity (%)",
+        "Preview opacity (0-255)",
         i64::from(settings.preview_opacity),
     )?;
     create_numeric(
@@ -1023,14 +1167,187 @@ fn build_preview(hwnd: HWND, settings: &Settings) -> Result<(), String> {
     create_numeric(
         hwnd,
         PREVIEW_CORNER,
-        "Corner radius (px)",
+        "Fallback corner radius (96-DPI px)",
         i64::from(settings.preview_corner_radius),
+    )?;
+    create_numeric(
+        hwnd,
+        PREVIEW_BORDER,
+        "Border thickness (96-DPI px)",
+        i64::from(settings.preview_border_thickness),
+    )?;
+    create_checkbox(
+        hwnd,
+        PREVIEW_WINDOW_CORNERS,
+        "Use the standard Windows corner radius",
+        settings.preview_use_window_corner_radius,
     )?;
     create_text(
         hwnd,
         1721,
-        "Preview changes follow the selected window frame and use the radial accent color.",
+        "The selected frame sets preview size. Border and fallback radius scale with DPI; the per-pixel radius stays active on Windows versions without DWM rounded corners.",
     )?;
+    Ok(())
+}
+
+fn build_advanced(hwnd: HWND, settings: &Settings) -> Result<(), String> {
+    create_group(hwnd, ADV_GROUP_PLACEMENT, "Placement, edges, and animation")?;
+    create_decimal(
+        hwnd,
+        ADV_MIN_SCREEN_INCHES,
+        "Minimum screen diagonal (inches; 0 disables)",
+        settings.padding_minimum_screen_inches,
+    )?;
+    let edge = settings.edge_padding.unwrap_or_default();
+    create_checkbox(
+        hwnd,
+        ADV_EDGE_ENABLED,
+        "Set padding separately for each screen edge",
+        settings.edge_padding.is_some(),
+    )?;
+    create_numeric(
+        hwnd,
+        ADV_EDGE_TOP,
+        "Top edge padding (px)",
+        i64::from(edge.top),
+    )?;
+    create_numeric(
+        hwnd,
+        ADV_EDGE_RIGHT,
+        "Right edge padding (px)",
+        i64::from(edge.right),
+    )?;
+    create_numeric(
+        hwnd,
+        ADV_EDGE_BOTTOM,
+        "Bottom edge padding (px)",
+        i64::from(edge.bottom),
+    )?;
+    create_numeric(
+        hwnd,
+        ADV_EDGE_LEFT,
+        "Left edge padding (px)",
+        i64::from(edge.left),
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_RESTORE_ON_DRAG,
+        "Restore the previous frame when dragging a window",
+        settings.restore_window_frame_on_drag,
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_SHIFT_FOCUS_STASHED,
+        "Move focus to the next window when stashing",
+        settings.shift_focus_when_stashed,
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_ANIMATE_WINDOWS,
+        "Animate window resizing",
+        settings.animate_window_resizes,
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_ANIMATE_STASHED,
+        "Animate stashing and restoring",
+        settings.animate_stashed_windows,
+    )?;
+    create_numeric(
+        hwnd,
+        ADV_ANIMATION_DURATION,
+        "Animation duration (ms)",
+        i64::from(settings.animation_duration_ms),
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_IGNORE_LOW_POWER,
+        "Allow animations in low-power mode",
+        settings.ignore_low_power_mode,
+    )?;
+
+    create_group(hwnd, ADV_GROUP_INPUT, "Input, cycling, and updates")?;
+    create_text(hwnd, ADV_PREVIEW_START + 1000, "Start preview from")?;
+    let preview_start = create_combo(hwnd, ADV_PREVIEW_START)?;
+    for label in [
+        "Selected action",
+        "Center of the radial menu",
+        "Center of the screen",
+    ] {
+        send_text(preview_start, CB_ADDSTRING, label);
+    }
+    set_combo_selection(
+        preview_start,
+        match settings.preview_start {
+            PreviewStart::ActionCenter => 0,
+            PreviewStart::RadialMenu => 1,
+            PreviewStart::ScreenCenter => 2,
+        },
+    );
+    create_text(hwnd, ADV_TRIGGER_SIDE + 1000, "Trigger mouse side")?;
+    let trigger_side = create_combo(hwnd, ADV_TRIGGER_SIDE)?;
+    for label in ["Either side", "Left button", "Right button"] {
+        send_text(trigger_side, CB_ADDSTRING, label);
+    }
+    set_combo_selection(
+        trigger_side,
+        match settings.trigger_side {
+            TriggerSide::Either => 0,
+            TriggerSide::Left => 1,
+            TriggerSide::Right => 2,
+        },
+    );
+    create_checkbox(
+        hwnd,
+        ADV_CYCLE_RESTART,
+        "Restart an action cycle after its last item",
+        settings.cycle_restart,
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_DOUBLE_TAP,
+        "Double-tap the trigger to activate it",
+        settings.double_tap_to_trigger,
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_MIDDLE_CLICK,
+        "Allow middle-click as a trigger",
+        settings.middle_click_triggers,
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_MIDDLE_DELAY,
+        "Use the trigger delay for middle-click",
+        settings.middle_click_uses_delay,
+    )?;
+    create_numeric(
+        hwnd,
+        ADV_TRIGGER_TIMEOUT,
+        "Trigger timeout (ms; 0 disables)",
+        i64::from(settings.trigger_timeout_ms),
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_HIDE_NO_SELECTION,
+        "Hide the menu when nothing is selected",
+        settings.hide_on_no_selection,
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_HIDE_TRAY,
+        "Hide the notification-area icon",
+        settings.hide_tray_icon,
+    )?;
+    create_checkbox(
+        hwnd,
+        ADV_DEV_RELEASES,
+        "Include development updates",
+        settings.include_development_versions,
+    )?;
+    update_edge_padding_enabled(hwnd);
+    update_animation_enabled(hwnd);
+    update_middle_click_delay_enabled(hwnd);
     Ok(())
 }
 
@@ -1419,6 +1736,66 @@ fn set_checked_by_id(hwnd: HWND, id: i32, value: bool) {
     }
 }
 
+fn set_enabled_by_id(hwnd: HWND, id: i32, enabled: bool) {
+    if let Ok(control) = unsafe { GetDlgItem(Some(hwnd), id) } {
+        unsafe {
+            let _ = EnableWindow(control, enabled);
+        }
+    }
+}
+
+fn update_radial_color_enabled(hwnd: HWND) {
+    let enabled = !is_checked(hwnd, RADIAL_SYSTEM_ACCENT);
+    for id in [
+        RADIAL_COLOR + 1000,
+        RADIAL_COLOR,
+        field_error_id(RADIAL_COLOR),
+    ] {
+        set_enabled_by_id(hwnd, id, enabled);
+    }
+}
+
+fn update_gradient_enabled(hwnd: HWND) {
+    let enabled = is_checked(hwnd, RADIAL_GRADIENT);
+    for id in [
+        RADIAL_GRADIENT_COLOR + 1000,
+        RADIAL_GRADIENT_COLOR,
+        field_error_id(RADIAL_GRADIENT_COLOR),
+    ] {
+        set_enabled_by_id(hwnd, id, enabled);
+    }
+}
+
+fn update_edge_padding_enabled(hwnd: HWND) {
+    let enabled = is_checked(hwnd, ADV_EDGE_ENABLED);
+    for id in [ADV_EDGE_TOP, ADV_EDGE_RIGHT, ADV_EDGE_BOTTOM, ADV_EDGE_LEFT] {
+        for control in [id + 1000, id, field_error_id(id)] {
+            set_enabled_by_id(hwnd, control, enabled);
+        }
+    }
+}
+
+fn update_animation_enabled(hwnd: HWND) {
+    let enabled = is_checked(hwnd, ADV_ANIMATE_WINDOWS) || is_checked(hwnd, ADV_ANIMATE_STASHED);
+    for id in [
+        ADV_ANIMATION_DURATION + 1000,
+        ADV_ANIMATION_DURATION,
+        field_error_id(ADV_ANIMATION_DURATION),
+    ] {
+        set_enabled_by_id(hwnd, id, enabled);
+    }
+}
+
+fn update_middle_click_delay_enabled(hwnd: HWND) {
+    set_enabled_by_id(hwnd, ADV_MIDDLE_DELAY, is_checked(hwnd, ADV_MIDDLE_CLICK));
+}
+
+fn set_combo_selection(control: HWND, index: usize) {
+    unsafe {
+        SendMessageW(control, CB_SETCURSEL, Some(WPARAM(index)), None);
+    }
+}
+
 fn load_frame_editor(hwnd: HWND, selected: Option<usize>) {
     let settings = STATE.with(|state| {
         state
@@ -1752,14 +2129,14 @@ fn layout_page(hwnd: HWND, page: usize) {
     match page {
         0 => {
             let column = (body_width - gap) / 2;
-            move_control(hwnd, 1700, x, body_y, column, (height - 220).max(338));
+            move_control(hwnd, 1700, x, body_y, column, (height - 220).max(474));
             move_control(
                 hwnd,
                 1701,
                 x + column + gap,
                 body_y,
                 column,
-                (height - 220).max(338),
+                (height - 220).max(474),
             );
             let row = |n: i32| body_y + 36 + n * 48;
             for (id, n) in [
@@ -1778,8 +2155,9 @@ fn layout_page(hwnd: HWND, page: usize) {
                 (BEHAVIOR_MOVE_CURSOR, 4),
                 (BEHAVIOR_IGNORE_FULLSCREEN, 5),
                 (BEHAVIOR_DISABLE_CURSOR, 6),
+                (BEHAVIOR_LOCK_CENTER, 7),
             ] {
-                move_control(hwnd, id, x + 16, body_y + 36 + n * 35, column - 32, 26);
+                move_control(hwnd, id, x + 16, body_y + 232 + n * 30, column - 32, 26);
             }
 
             let rx = x + column + gap + 16;
@@ -1836,7 +2214,7 @@ fn layout_page(hwnd: HWND, page: usize) {
         }
         1 => {
             let half = (body_width - gap) / 2;
-            move_control(hwnd, 1710, x, body_y, body_width, (height - 212).max(438));
+            move_control(hwnd, 1710, x, body_y, body_width, (height - 212).max(450));
             move_control(
                 hwnd,
                 RADIAL_VISIBLE,
@@ -1857,22 +2235,62 @@ fn layout_page(hwnd: HWND, page: usize) {
                 RADIAL_COLOR + 1000,
                 x + half + 4,
                 body_y + 76,
-                half - 120,
+                half - 18,
                 24,
             );
             move_control(
                 hwnd,
                 RADIAL_COLOR,
-                x + half + half - 126,
-                body_y + 73,
-                110,
+                x + half + 4,
+                body_y + 102,
+                half - 18,
                 25,
             );
             move_control(
                 hwnd,
                 field_error_id(RADIAL_COLOR),
                 x + half + 4,
-                body_y + 101,
+                body_y + 128,
+                half - 18,
+                18,
+            );
+            move_control(
+                hwnd,
+                RADIAL_SYSTEM_ACCENT,
+                x + half + 4,
+                body_y + 152,
+                half - 18,
+                26,
+            );
+            move_control(
+                hwnd,
+                RADIAL_GRADIENT,
+                x + half + 4,
+                body_y + 182,
+                half - 18,
+                26,
+            );
+            move_control(
+                hwnd,
+                RADIAL_GRADIENT_COLOR + 1000,
+                x + half + 4,
+                body_y + 210,
+                half - 18,
+                22,
+            );
+            move_control(
+                hwnd,
+                RADIAL_GRADIENT_COLOR,
+                x + half + 4,
+                body_y + 234,
+                half - 18,
+                24,
+            );
+            move_control(
+                hwnd,
+                field_error_id(RADIAL_GRADIENT_COLOR),
+                x + half + 4,
+                body_y + 258,
                 half - 18,
                 18,
             );
@@ -1880,7 +2298,7 @@ fn layout_page(hwnd: HWND, page: usize) {
                 let col = slot / 4;
                 let row = slot % 4;
                 let cx = x + col as i32 * (half + gap) + 16;
-                let cy = body_y + 252 + row as i32 * 42;
+                let cy = body_y + 292 + row as i32 * 36;
                 move_control(hwnd, ACTION_LABEL_BASE + slot as i32, cx, cy, 112, 22);
                 move_control(
                     hwnd,
@@ -1895,13 +2313,13 @@ fn layout_page(hwnd: HWND, page: usize) {
                 hwnd,
                 RADIAL_ERROR,
                 x + 16,
-                body_y + 414,
+                body_y + 426,
                 body_width - 32,
                 24,
             );
         }
         2 => {
-            move_control(hwnd, 1720, x, body_y, body_width, 330);
+            move_control(hwnd, 1720, x, body_y, body_width, (height - 220).max(370));
             move_control(
                 hwnd,
                 PREVIEW_VISIBLE,
@@ -1914,10 +2332,19 @@ fn layout_page(hwnd: HWND, page: usize) {
                 (PREVIEW_OPACITY, 92),
                 (PREVIEW_PADDING, 140),
                 (PREVIEW_CORNER, 188),
+                (PREVIEW_BORDER, 236),
             ] {
                 layout_numeric(hwnd, id, x + 16, body_y + y, 370);
             }
-            move_control(hwnd, 1721, x + 16, body_y + 254, body_width - 32, 44);
+            move_control(
+                hwnd,
+                PREVIEW_WINDOW_CORNERS,
+                x + 16,
+                body_y + 284,
+                body_width - 32,
+                26,
+            );
+            move_control(hwnd, 1721, x + 16, body_y + 318, body_width - 32, 44);
         }
         3 => {
             move_control(hwnd, 1730, x, body_y, body_width, (height - 220).max(430));
@@ -2056,6 +2483,120 @@ fn layout_page(hwnd: HWND, page: usize) {
             );
         }
         6 => {
+            let column = (body_width - gap) / 2;
+            let right_x = x + column + gap;
+            move_control(
+                hwnd,
+                ADV_GROUP_PLACEMENT,
+                x,
+                body_y,
+                column,
+                (height - 220).max(520),
+            );
+            move_control(
+                hwnd,
+                ADV_GROUP_INPUT,
+                right_x,
+                body_y,
+                column,
+                (height - 220).max(520),
+            );
+            layout_numeric(
+                hwnd,
+                ADV_MIN_SCREEN_INCHES,
+                x + 16,
+                body_y + 38,
+                column - 32,
+            );
+            move_control(hwnd, ADV_EDGE_ENABLED, x + 16, body_y + 82, column - 32, 26);
+            for (id, y) in [
+                (ADV_EDGE_TOP, 116),
+                (ADV_EDGE_RIGHT, 164),
+                (ADV_EDGE_BOTTOM, 212),
+                (ADV_EDGE_LEFT, 260),
+            ] {
+                layout_numeric(hwnd, id, x + 16, body_y + y, column - 32);
+            }
+            for (id, y) in [
+                (ADV_RESTORE_ON_DRAG, 310),
+                (ADV_SHIFT_FOCUS_STASHED, 340),
+                (ADV_ANIMATE_WINDOWS, 370),
+                (ADV_ANIMATE_STASHED, 400),
+            ] {
+                move_control(hwnd, id, x + 16, body_y + y, column - 28, 26);
+            }
+            layout_numeric(
+                hwnd,
+                ADV_ANIMATION_DURATION,
+                x + 16,
+                body_y + 432,
+                column - 32,
+            );
+            move_control(
+                hwnd,
+                ADV_IGNORE_LOW_POWER,
+                x + 16,
+                body_y + 480,
+                column - 28,
+                26,
+            );
+
+            move_control(
+                hwnd,
+                ADV_PREVIEW_START + 1000,
+                right_x + 16,
+                body_y + 38,
+                column - 32,
+                22,
+            );
+            move_control(
+                hwnd,
+                ADV_PREVIEW_START,
+                right_x + 16,
+                body_y + 62,
+                column - 32,
+                230,
+            );
+            move_control(
+                hwnd,
+                ADV_TRIGGER_SIDE + 1000,
+                right_x + 16,
+                body_y + 104,
+                column - 32,
+                22,
+            );
+            move_control(
+                hwnd,
+                ADV_TRIGGER_SIDE,
+                right_x + 16,
+                body_y + 128,
+                column - 32,
+                230,
+            );
+            for (id, y) in [
+                (ADV_CYCLE_RESTART, 164),
+                (ADV_DOUBLE_TAP, 194),
+                (ADV_MIDDLE_CLICK, 224),
+                (ADV_MIDDLE_DELAY, 254),
+            ] {
+                move_control(hwnd, id, right_x + 16, body_y + y, column - 28, 26);
+            }
+            layout_numeric(
+                hwnd,
+                ADV_TRIGGER_TIMEOUT,
+                right_x + 16,
+                body_y + 284,
+                column - 32,
+            );
+            for (id, y) in [
+                (ADV_HIDE_NO_SELECTION, 332),
+                (ADV_HIDE_TRAY, 362),
+                (ADV_DEV_RELEASES, 392),
+            ] {
+                move_control(hwnd, id, right_x + 16, body_y + y, column - 28, 26);
+            }
+        }
+        7 => {
             move_control(hwnd, 1760, x, body_y, body_width, (height - 220).max(238));
             move_control(hwnd, 1761, x + 16, body_y + 38, body_width - 32, 24);
             move_control(hwnd, 1762, x + 16, body_y + 72, body_width - 32, 42);
@@ -2072,6 +2613,11 @@ fn layout_page(hwnd: HWND, page: usize) {
         }
         _ => {}
     }
+    // Clipped child regions move during scrolling. Erase the uncovered parent areas after all
+    // controls have been positioned so stale control backgrounds cannot remain as gray bands.
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, true);
+    }
 }
 
 fn layout_numeric(hwnd: HWND, id: i32, x: i32, y: i32, width: i32) {
@@ -2081,6 +2627,7 @@ fn layout_numeric(hwnd: HWND, id: i32, x: i32, y: i32, width: i32) {
 }
 
 fn update_caption(hwnd: HWND, page: usize) {
+    let version = env!("CARGO_PKG_VERSION");
     let descriptions = [
         "Set how Orbit places windows, starts, and responds to the trigger.",
         "Choose the ring shape, accent, and action assigned to each direction.",
@@ -2088,13 +2635,24 @@ fn update_caption(hwnd: HWND, page: usize) {
         "Create keyboard shortcuts that cycle through window actions.",
         "Define reusable layouts using fractions of each monitor work area.",
         "Keep selected applications out of Orbit window management.",
-        "Orbit version 0.1.0 and update controls.",
+        "Fine-tune edge padding, animations, trigger input, and cycling.",
+        "Orbit version and update controls.",
     ];
     if let Some(title) = PAGE_NAMES.get(page) {
         set_control_text(hwnd, PAGE_TITLE, title);
     }
-    if let Some(description) = descriptions.get(page) {
-        set_control_text(hwnd, PAGE_DESCRIPTION, description);
+    if page == 7 {
+        set_control_text(
+            hwnd,
+            PAGE_DESCRIPTION,
+            &format!("Orbit version {version} and update controls."),
+        );
+    } else if let Some(description) = descriptions.get(page) {
+        set_control_text(
+            hwnd,
+            PAGE_DESCRIPTION,
+            &format!("{description}  Scroll with the wheel or Ctrl+Page Up/Down."),
+        );
     }
 }
 
@@ -2161,6 +2719,7 @@ fn capture_page(hwnd: HWND, page: usize, settings: &mut Settings) -> Result<(), 
             settings.move_cursor_with_window = is_checked(hwnd, BEHAVIOR_MOVE_CURSOR);
             settings.ignore_fullscreen = is_checked(hwnd, BEHAVIOR_IGNORE_FULLSCREEN);
             settings.disable_cursor_interaction = is_checked(hwnd, BEHAVIOR_DISABLE_CURSOR);
+            settings.lock_radial_menu_to_center = is_checked(hwnd, BEHAVIOR_LOCK_CENTER);
             settings.trigger.control = is_checked(hwnd, BEHAVIOR_TRIGGER_CONTROL);
             settings.trigger.alt = is_checked(hwnd, BEHAVIOR_TRIGGER_ALT);
             settings.trigger.shift = is_checked(hwnd, BEHAVIOR_TRIGGER_SHIFT);
@@ -2168,9 +2727,9 @@ fn capture_page(hwnd: HWND, page: usize, settings: &mut Settings) -> Result<(), 
             settings.trigger.key = selected_key(hwnd, BEHAVIOR_TRIGGER_KEY)
                 .ok_or((BEHAVIOR_TRIGGER_KEY, "Choose a trigger key.".into()))?;
             settings.trigger_delay_ms =
-                read_int(hwnd, BEHAVIOR_TRIGGER_DELAY, "Trigger delay", 0, 10_000)? as u32;
+                read_int(hwnd, BEHAVIOR_TRIGGER_DELAY, "Trigger delay", 0, 1000)? as u32;
             settings.cycle_timeout_ms =
-                read_int(hwnd, BEHAVIOR_CYCLE_TIMEOUT, "Cycle timeout", 0, 60_000)? as u32;
+                read_int(hwnd, BEHAVIOR_CYCLE_TIMEOUT, "Cycle timeout", 50, 60_000)? as u32;
             settings.cycle_backwards_on_shift = is_checked(hwnd, BEHAVIOR_CYCLE_SHIFT);
             settings.reverse_scroll = is_checked(hwnd, BEHAVIOR_REVERSE_SCROLL);
             settings.launch_at_login = is_checked(hwnd, BEHAVIOR_LAUNCH_LOGIN);
@@ -2193,23 +2752,14 @@ fn capture_page(hwnd: HWND, page: usize, settings: &mut Settings) -> Result<(), 
                 0,
                 (settings.radial_size / 2) as i64,
             )? as u32;
-            let color = read_control_text(hwnd, RADIAL_COLOR);
-            let value = color.trim().trim_start_matches('#');
-            settings.accent_color = u32::from_str_radix(value, 16).map_err(|_| {
-                set_field_error(
-                    hwnd,
-                    RADIAL_COLOR,
-                    "Enter a six-digit hex color, such as #67C1D6.",
-                );
-                (
-                    RADIAL_COLOR,
-                    "Accent color must be six hexadecimal digits, such as #67C1D6.".into(),
-                )
-            })?;
-            if value.len() != 6 {
-                let error = "Enter a six-digit hex color, such as #67C1D6.";
-                set_field_error(hwnd, RADIAL_COLOR, error);
-                return Err((RADIAL_COLOR, error.into()));
+            settings.use_system_accent = is_checked(hwnd, RADIAL_SYSTEM_ACCENT);
+            settings.use_gradient = is_checked(hwnd, RADIAL_GRADIENT);
+            if !settings.use_system_accent {
+                settings.accent_color = read_rgb(hwnd, RADIAL_COLOR, "Accent color")?;
+            }
+            if settings.use_gradient {
+                settings.gradient_color =
+                    read_rgb(hwnd, RADIAL_GRADIENT_COLOR, "Gradient end color")?;
             }
             let options = action_options(settings);
             for slot in 0..ACTION_COUNT {
@@ -2226,11 +2776,14 @@ fn capture_page(hwnd: HWND, page: usize, settings: &mut Settings) -> Result<(), 
         2 => {
             settings.preview_visible = is_checked(hwnd, PREVIEW_VISIBLE);
             settings.preview_opacity =
-                read_int(hwnd, PREVIEW_OPACITY, "Preview opacity", 0, 100)? as u8;
+                read_int(hwnd, PREVIEW_OPACITY, "Preview opacity", 0, 255)? as u8;
             settings.preview_padding =
                 read_int(hwnd, PREVIEW_PADDING, "Preview inset", 0, 200)? as i32;
             settings.preview_corner_radius =
                 read_int(hwnd, PREVIEW_CORNER, "Preview corner radius", 0, 200)? as u32;
+            settings.preview_border_thickness =
+                read_int(hwnd, PREVIEW_BORDER, "Preview border thickness", 0, 32)? as u32;
+            settings.preview_use_window_corner_radius = is_checked(hwnd, PREVIEW_WINDOW_CORNERS);
         }
         3 => {
             write_shortcut_editor(hwnd, settings, true)
@@ -2249,7 +2802,54 @@ fn capture_page(hwnd: HWND, page: usize, settings: &mut Settings) -> Result<(), 
                 .map(str::to_string)
                 .collect();
         }
-        6 => {}
+        6 => {
+            settings.padding_minimum_screen_inches = read_decimal(
+                hwnd,
+                ADV_MIN_SCREEN_INCHES,
+                "Minimum screen diagonal",
+                0.0,
+                200.0,
+            )?;
+            if is_checked(hwnd, ADV_EDGE_ENABLED) {
+                settings.edge_padding = Some(EdgePadding {
+                    top: read_int(hwnd, ADV_EDGE_TOP, "Top edge padding", 0, 200)? as i32,
+                    right: read_int(hwnd, ADV_EDGE_RIGHT, "Right edge padding", 0, 200)? as i32,
+                    bottom: read_int(hwnd, ADV_EDGE_BOTTOM, "Bottom edge padding", 0, 200)? as i32,
+                    left: read_int(hwnd, ADV_EDGE_LEFT, "Left edge padding", 0, 200)? as i32,
+                });
+            } else {
+                settings.edge_padding = None;
+            }
+            settings.restore_window_frame_on_drag = is_checked(hwnd, ADV_RESTORE_ON_DRAG);
+            settings.shift_focus_when_stashed = is_checked(hwnd, ADV_SHIFT_FOCUS_STASHED);
+            settings.animate_window_resizes = is_checked(hwnd, ADV_ANIMATE_WINDOWS);
+            settings.animate_stashed_windows = is_checked(hwnd, ADV_ANIMATE_STASHED);
+            settings.animation_duration_ms =
+                read_int(hwnd, ADV_ANIMATION_DURATION, "Animation duration", 0, 2000)? as u32;
+            settings.ignore_low_power_mode = is_checked(hwnd, ADV_IGNORE_LOW_POWER);
+            settings.preview_start = match combo_index(hwnd, ADV_PREVIEW_START) {
+                Some(0) => PreviewStart::ActionCenter,
+                Some(1) => PreviewStart::RadialMenu,
+                Some(2) => PreviewStart::ScreenCenter,
+                _ => return Err((ADV_PREVIEW_START, "Choose where preview starts.".into())),
+            };
+            settings.trigger_side = match combo_index(hwnd, ADV_TRIGGER_SIDE) {
+                Some(0) => TriggerSide::Either,
+                Some(1) => TriggerSide::Left,
+                Some(2) => TriggerSide::Right,
+                _ => return Err((ADV_TRIGGER_SIDE, "Choose a trigger mouse side.".into())),
+            };
+            settings.cycle_restart = is_checked(hwnd, ADV_CYCLE_RESTART);
+            settings.double_tap_to_trigger = is_checked(hwnd, ADV_DOUBLE_TAP);
+            settings.middle_click_triggers = is_checked(hwnd, ADV_MIDDLE_CLICK);
+            settings.middle_click_uses_delay = is_checked(hwnd, ADV_MIDDLE_DELAY);
+            settings.trigger_timeout_ms =
+                read_int(hwnd, ADV_TRIGGER_TIMEOUT, "Trigger timeout", 0, 600_000)? as u32;
+            settings.hide_on_no_selection = is_checked(hwnd, ADV_HIDE_NO_SELECTION);
+            settings.hide_tray_icon = is_checked(hwnd, ADV_HIDE_TRAY);
+            settings.include_development_versions = is_checked(hwnd, ADV_DEV_RELEASES);
+        }
+        7 => {}
         _ => return Err((0, "Unknown settings page.".into())),
     }
     Ok(())
@@ -2264,6 +2864,43 @@ fn read_int(hwnd: HWND, id: i32, label: &str, min: i64, max: i64) -> Result<i64,
         }
         _ => {
             let error = format!("{label} must be a whole number from {min} to {max}.");
+            set_field_error(hwnd, id, &error);
+            Err((id, error))
+        }
+    }
+}
+
+fn read_decimal(
+    hwnd: HWND,
+    id: i32,
+    label: &str,
+    min: f64,
+    max: f64,
+) -> Result<f64, (i32, String)> {
+    let text = read_control_text(hwnd, id);
+    match text.trim().parse::<f64>() {
+        Ok(value) if value.is_finite() && (min..=max).contains(&value) => {
+            set_control_text(hwnd, field_error_id(id), "");
+            Ok(value)
+        }
+        _ => {
+            let error = format!("{label} must be a number from {min} to {max}.");
+            set_field_error(hwnd, id, &error);
+            Err((id, error))
+        }
+    }
+}
+
+fn read_rgb(hwnd: HWND, id: i32, label: &str) -> Result<u32, (i32, String)> {
+    let input = read_control_text(hwnd, id);
+    let value = input.trim().trim_start_matches('#');
+    match (value.len(), u32::from_str_radix(value, 16)) {
+        (6, Ok(color)) => {
+            set_control_text(hwnd, field_error_id(id), "");
+            Ok(color)
+        }
+        _ => {
+            let error = format!("{label} must be six hexadecimal digits, such as #67C1D6.");
             set_field_error(hwnd, id, &error);
             Err((id, error))
         }
@@ -2666,7 +3303,7 @@ fn client_size_logical(hwnd: HWND) -> (i32, i32) {
 }
 
 fn dpi_for_window(hwnd: HWND) -> u32 {
-    unsafe { GetDpiForWindow(hwnd) }.max(96)
+    unsafe { GetDpiForWindow(hwnd) }.max(48)
 }
 
 fn px(value: i32, dpi: u32) -> i32 {
@@ -2736,11 +3373,45 @@ fn current_page() -> usize {
 fn show_settings_validation_error(hwnd: HWND, page: usize, error: &str) {
     let (control, error_id) = match page {
         0 if error.contains("trigger") => (BEHAVIOR_TRIGGER_KEY, BEHAVIOR_TRIGGER_ERROR),
-        1 if error.contains("custom frame") => (RADIAL_ACTION_BASE, RADIAL_ERROR),
+        0 if error.contains("cycle_timeout") => (
+            BEHAVIOR_CYCLE_TIMEOUT,
+            field_error_id(BEHAVIOR_CYCLE_TIMEOUT),
+        ),
+        1 if error.contains("gradient_color") => {
+            (RADIAL_GRADIENT_COLOR, field_error_id(RADIAL_GRADIENT_COLOR))
+        }
+        1 if error.contains("color") => (RADIAL_COLOR, field_error_id(RADIAL_COLOR)),
+        1 if error.contains("radial_thickness") => {
+            (RADIAL_THICKNESS, field_error_id(RADIAL_THICKNESS))
+        }
+        1 if error.contains("radial_corner_radius") => {
+            (RADIAL_CORNER, field_error_id(RADIAL_CORNER))
+        }
+        1 if error.contains("radial") => (RADIAL_SIZE, field_error_id(RADIAL_SIZE)),
+        2 if error.contains("preview_padding") => {
+            (PREVIEW_PADDING, field_error_id(PREVIEW_PADDING))
+        }
+        2 if error.contains("preview_corner_radius") => {
+            (PREVIEW_CORNER, field_error_id(PREVIEW_CORNER))
+        }
+        2 if error.contains("preview_border_thickness") => {
+            (PREVIEW_BORDER, field_error_id(PREVIEW_BORDER))
+        }
         3 if error.contains("shortcut") || error.contains("custom frame") => {
             (SHORTCUT_LIST, SHORTCUTS_ERROR)
         }
         4 if error.contains("custom frame") => (FRAME_LIST, FRAMES_ERROR),
+        6 if error.contains("edge padding") => (ADV_EDGE_TOP, field_error_id(ADV_EDGE_TOP)),
+        6 if error.contains("padding_minimum_screen_inches") => {
+            (ADV_MIN_SCREEN_INCHES, field_error_id(ADV_MIN_SCREEN_INCHES))
+        }
+        6 if error.contains("trigger_timeout") => {
+            (ADV_TRIGGER_TIMEOUT, field_error_id(ADV_TRIGGER_TIMEOUT))
+        }
+        6 if error.contains("animation_duration") => (
+            ADV_ANIMATION_DURATION,
+            field_error_id(ADV_ANIMATION_DURATION),
+        ),
         _ => (0, 0),
     };
     if error_id > 0 {
@@ -2790,9 +3461,22 @@ fn show_form_error(hwnd: HWND, control: i32, error: &str) {
 fn clear_page_error(hwnd: HWND, page: usize) {
     let ids = match page {
         0 => vec![BEHAVIOR_TRIGGER_ERROR],
-        1 => vec![field_error_id(RADIAL_COLOR), RADIAL_ERROR],
+        1 => vec![
+            field_error_id(RADIAL_COLOR),
+            field_error_id(RADIAL_GRADIENT_COLOR),
+            RADIAL_ERROR,
+        ],
         3 => vec![SHORTCUTS_ERROR],
         4 => vec![FRAMES_ERROR, field_error_id(FRAME_NAME)],
+        6 => vec![
+            field_error_id(ADV_MIN_SCREEN_INCHES),
+            field_error_id(ADV_EDGE_TOP),
+            field_error_id(ADV_EDGE_RIGHT),
+            field_error_id(ADV_EDGE_BOTTOM),
+            field_error_id(ADV_EDGE_LEFT),
+            field_error_id(ADV_ANIMATION_DURATION),
+            field_error_id(ADV_TRIGGER_TIMEOUT),
+        ],
         _ => Vec::new(),
     };
     for id in ids {

@@ -26,6 +26,9 @@ jobs:
       - name: Inspect Windows executable
         shell: pwsh
         run: ./tools/Inspect-Artifact.ps1
+      - name: Inspect corresponding source
+        shell: pwsh
+        run: Get-ChildItem dist/Orbit-*-source.zip | ForEach-Object { ./tools/Inspect-SourceArchive.ps1 -Archive $_.FullName }
       - name: Test installer on disposable hosted runner
         shell: pwsh
         run: ./tools/Test-Installer.ps1

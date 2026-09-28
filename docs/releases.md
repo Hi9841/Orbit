@@ -28,16 +28,26 @@ try {
 
 Edit the unsigned manifest's release notes before signing. The signer refuses to replace an existing output file. Regenerate metadata whenever the installer changes.
 
+Verify the actual installer before publishing:
+
+```powershell
+./target/release/orbit-release.exe verify dist/update.json dist/OrbitSetup-VERSION-x64.exe
+```
+
+This checks the signature against Orbit's embedded public key and hashes the complete installer. Signing also refuses a seed that does not match that public key.
+
 The signed payload is compact UTF-8 JSON with fields in this exact order: `format`, `version`, `installer_url`, `sha256`, `notes`. `format` is `orbit-update-v1`. The signature is base64 Ed25519 over those bytes.
 
 ## Publish
 
 Create a release tagged `vVERSION` in [Hi9841/Orbit](https://github.com/Hi9841/Orbit). Attach the installer, source ZIP, dependency notices, checksum file, and signed `update.json`.
 
-The application checks `https://github.com/Hi9841/Orbit/releases/latest/download/update.json`. GitHub excludes prereleases from this endpoint. A stable Orbit build also rejects prerelease versions in update manifests. HTTP 404 means no stable update is available yet; other network errors are reported for manual checks and do not prevent window management.
+By default, the application checks `https://github.com/Hi9841/Orbit/releases/latest/download/update.json`. GitHub excludes prereleases from this endpoint. Stable-only checks also reject prerelease versions in update manifests. HTTP 404 means no stable update is available yet; other network errors are reported for manual checks and do not prevent window management.
+
+With "Include development versions" enabled, Orbit reads the repository's release listing and verifies signed `update.json` assets before choosing the newest offered version. The release listing itself cannot authorize an installer. Every accepted manifest must pass the same embedded-key signature check.
 
 The updater checks in the background, asks before downloading and installing, verifies the manifest and installer, and launches the normal installer. The installer closes the previous resident instance and restarts Orbit for `/UPDATE=1` upgrades.
 
 ## Forks
 
-Generate a new key using `orbit-release keygen PRIVATE_FILE`. Store only its printed public key in the fork. Set `ORBIT_UPDATE_MANIFEST_URL` and `ORBIT_UPDATE_PUBLIC_KEY` at build time to use another feed and key. Update installer links and release scripts to point to the fork.
+Generate a new key using `orbit-release keygen PRIVATE_FILE`. Store only its printed public key in the fork. Set `ORBIT_UPDATE_MANIFEST_URL`, `ORBIT_DEVELOPMENT_RELEASES_URL`, and `ORBIT_UPDATE_PUBLIC_KEY` at build time to use another feed and key. Update installer links and release scripts to point to the fork.
