@@ -32,10 +32,19 @@ jobs:
       - name: Exercise native windows on disposable hosted runner
         timeout-minutes: 5
         shell: pwsh
+        env:
+          ORBIT_DESKTOP_CAPTURE: .tools/desktop-captures
         run: |
           cargo test --locked --bin orbit -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --test native_workflow -- --ignored --test-threads=1 --nocapture
+      - name: Save native desktop captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orbit-native-desktop
+          path: .tools/desktop-captures/*.png
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: Orbit-windows-x64

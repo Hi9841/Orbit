@@ -2,7 +2,7 @@
 use std::process::{Child, Command};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
@@ -90,14 +90,70 @@ fn frame(window: HWND) -> (i32, i32, i32, i32) {
     (rect.left, rect.top, rect.right, rect.bottom)
 }
 
+fn capture(name: &str) {
+    let Some(directory) = std::env::var_os("ORBIT_DESKTOP_CAPTURE") else {
+        return;
+    };
+    use std::os::windows::process::CommandExt;
+    std::fs::create_dir_all(&directory).unwrap();
+    let output = std::path::PathBuf::from(directory).join(format!("{name}.png"));
+    let mut process = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            "tools/Capture-TestDesktop.ps1",
+            "-Output",
+        ])
+        .arg(output)
+        .creation_flags(0x08000000)
+        .spawn()
+        .unwrap();
+    wait_for(|| process.try_wait().unwrap().is_some());
+    assert!(process.wait().unwrap().success());
+}
+
+fn dispatch(host: HWND, target: HWND, action: orbit::geometry::Action) {
+    use windows::Win32::System::DataExchange::COPYDATASTRUCT;
+    let mut payload = serde_json::to_vec(&serde_json::json!({
+        "version": 1, "target": target.0 as isize, "action": action
+    }))
+    .unwrap();
+    let packet = COPYDATASTRUCT {
+        dwData: 0x4f52_4254,
+        cbData: payload.len() as u32,
+        lpData: payload.as_mut_ptr().cast(),
+    };
+    let mut result = 0usize;
+    // This thread owns the disposable target. Allow incoming sent messages while
+    // the resident changes its placement, just as a normal app's event loop does.
+    assert_ne!(
+        unsafe {
+            SendMessageTimeoutW(
+                host,
+                WM_COPYDATA,
+                WPARAM(0),
+                LPARAM((&packet as *const COPYDATASTRUCT) as isize),
+                SMTO_ABORTIFHUNG,
+                5000,
+                Some(&mut result),
+            )
+        }
+        .0,
+        0,
+        "resident IPC timed out"
+    );
+    assert_eq!(result as isize, 1, "resident rejected {action:?}");
+}
+
 #[test]
 #[ignore = "takes foreground focus; run explicitly with --ignored --test-threads=1"]
 fn radial_preview_cancel_commit_undo_and_settings() {
     // A desktop API can block before the polling deadline gets control again.
     // Keep the hosted check bounded and preserve its last logged step.
     std::thread::spawn(|| {
-        sleep(Duration::from_secs(45));
-        eprintln!("native workflow exceeded its 45 second deadline");
+        sleep(Duration::from_secs(90));
+        eprintln!("native workflow exceeded its 90 second deadline");
         std::process::exit(1);
     });
     eprintln!("native workflow: create disposable target");
@@ -218,6 +274,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         area.bottom,
     );
     wait_for(|| frame(preview) == expected);
+    capture("radial-preview");
     key_event(VK_ESCAPE, false);
     eprintln!("native workflow: cancel radial");
     wait_for(|| !unsafe { IsWindowVisible(overlay).as_bool() });
@@ -246,6 +303,27 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         key_event(key, true);
     }
     wait_for(|| frame(target) == original);
+    eprintln!("native workflow: stash and restore through resident IPC");
+    dispatch(host, target, orbit::geometry::Action::StashLeft);
+    wait_for(|| frame(target).0 < area.left);
+    dispatch(host, target, orbit::geometry::Action::Unstash);
+    wait_for(|| frame(target) == original);
+    eprintln!("native workflow: recover hidden target after forced termination");
+    dispatch(host, target, orbit::geometry::Action::Hide);
+    wait_for(|| !unsafe { IsWindowVisible(target).as_bool() });
+    guard.child.kill().unwrap();
+    guard.child.wait().unwrap();
+    guard.child = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg("--resident")
+        .env("LOCALAPPDATA", config.path())
+        .spawn()
+        .unwrap();
+    wait_for(|| {
+        host = unsafe { FindWindowW(w!("OrbitWindow"), w!("Orbit")) }.unwrap_or_default();
+        !host.0.is_null()
+            && unsafe { IsWindowVisible(target).as_bool() }
+            && frame(target) == original
+    });
     eprintln!("native workflow: open settings");
     // Exercise the command through the executable, then inspect the real settings window.
     assert!(
@@ -259,6 +337,26 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         unsafe { FindWindowW(w!("OrbitSettings"), None) }
             .is_ok_and(|h| unsafe { IsWindowVisible(h).as_bool() })
     });
+    let settings = unsafe { FindWindowW(w!("OrbitSettings"), None) }.unwrap();
+    let sidebar = unsafe { GetDlgItem(Some(settings), 10) }.unwrap();
+    let count = unsafe { SendMessageW(sidebar, LB_GETCOUNT, None, None) }.0;
+    assert!(count >= 7, "settings pages are missing");
+    for index in 0..count {
+        unsafe {
+            SendMessageW(sidebar, LB_SETCURSEL, Some(WPARAM(index as usize)), None);
+            SendMessageW(
+                settings,
+                WM_COMMAND,
+                Some(WPARAM(10 | ((LBN_SELCHANGE as usize) << 16))),
+                Some(LPARAM(sidebar.0 as isize)),
+            );
+        }
+        // Let normal paint messages settle before capturing the real controls.
+        let painted = Instant::now() + Duration::from_millis(100);
+        wait_for(|| Instant::now() >= painted);
+        eprintln!("native workflow: settings page {index}");
+        capture(&format!("settings-{index}"));
+    }
     unsafe { PostMessageW(Some(host), WM_CLOSE, Default::default(), Default::default()) }.unwrap();
     eprintln!("native workflow: quit resident");
     wait_for(|| guard.child.try_wait().unwrap().is_some());
