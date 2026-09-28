@@ -79,23 +79,28 @@ fn wait_for(mut condition: impl FnMut() -> bool) {
 fn frame(window: HWND) -> (i32, i32, i32, i32) {
     let mut rect = RECT::default();
     unsafe { GetWindowRect(window, &mut rect) }.unwrap();
+    let _ = unsafe { windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(window, windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS, (&mut rect as *mut RECT).cast(), std::mem::size_of::<RECT>() as u32) };
     (rect.left, rect.top, rect.right, rect.bottom)
 }
 
 #[test]
 #[ignore = "takes foreground focus; run explicitly with --ignored --test-threads=1"]
 fn radial_preview_cancel_commit_undo_and_settings() {
+    unsafe { let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); }
     assert!(
         unsafe { FindWindowW(w!("OrbitWindow"), w!("Orbit")) }.is_err(),
         "quit Orbit before the desktop test"
     );
     let config = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(config.path().join("Orbit")).unwrap();
+    // Keep network and cosmetic inset out of the geometry assertions.
+    std::fs::write(config.path().join("Orbit/settings.json"), br#"{"version":1,"preview_padding":0,"updates_enabled":false}"#).unwrap();
     let foreground = unsafe { GetForegroundWindow() };
     let mut cursor = POINT::default();
     unsafe { GetCursorPos(&mut cursor) }.unwrap();
     let target = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            WINDOW_EX_STYLE::default(),
             w!("STATIC"),
             w!("Orbit disposable workflow target"),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -217,7 +222,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
             .success()
     );
     wait_for(|| {
-        unsafe { FindWindowW(w!("OrbitSettings"), w!("Orbit Settings")) }
+        unsafe { FindWindowW(w!("OrbitSettings"), None) }
             .is_ok_and(|h| unsafe { IsWindowVisible(h).as_bool() })
     });
     unsafe { PostMessageW(Some(host), WM_CLOSE, Default::default(), Default::default()) }.unwrap();

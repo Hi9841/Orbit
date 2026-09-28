@@ -11,7 +11,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install packaging compiler
         shell: pwsh
-        run: choco install innosetup --version=6.7.3 --yes --no-progress
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $installer
+          if ((Get-FileHash -Algorithm SHA256 $installer).Hash -ne '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732') { throw 'Inno Setup download hash mismatch' }
+          $signature = Get-AuthenticodeSignature $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Pyrsys B.V.*') { throw 'Inno Setup publisher signature mismatch' }
+          $process = Start-Process $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Inno Setup installation failed' }
       - name: Build installer and matching source
         shell: pwsh
         run: ./tools/Build-Release.ps1 -VendorDependencies
@@ -21,6 +28,12 @@ jobs:
       - name: Test installer on disposable hosted runner
         shell: pwsh
         run: ./tools/Test-Installer.ps1
+      - name: Exercise native windows on disposable hosted runner
+        shell: pwsh
+        run: |
+          cargo test --locked --bin orbit -- --ignored --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --test native_workflow -- --ignored --test-threads=1
       - uses: actions/upload-artifact@v4
         with:
           name: Orbit-windows-x64
