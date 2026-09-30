@@ -940,7 +940,13 @@ fn create_shell(hwnd: HWND) -> Result<(), String> {
         WINDOW_STYLE((LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS) as u32) | WS_TABSTOP,
         SIDEBAR,
     )?;
-    child(hwnd, w!("STATIC"), w!(""), WINDOW_STYLE(SS_NOPREFIX_RAW), PAGE_TITLE)?;
+    child(
+        hwnd,
+        w!("STATIC"),
+        w!(""),
+        WINDOW_STYLE(SS_NOPREFIX_RAW),
+        PAGE_TITLE,
+    )?;
     child(
         hwnd,
         w!("STATIC"),
@@ -3521,7 +3527,8 @@ fn retreat_focus_before_hide(parent: HWND, control: HWND) {
     }
 }
 
-fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {    if let Ok(control) = unsafe { GetDlgItem(Some(hwnd), id) } {
+fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
+    if let Ok(control) = unsafe { GetDlgItem(Some(hwnd), id) } {
         let dpi = dpi_for_window(hwnd);
         let page_child = id >= PAGE_ID_START;
         let scrolls_with_page = page_child

@@ -390,10 +390,7 @@ fn prewarm_radial_cache(settings: &Settings, dpi: u32) {
         let (selected, sector) = if slot == 8 {
             (None, None)
         } else {
-            (
-                Some(settings.radial_actions[slot]),
-                Some(slot),
-            )
+            (Some(settings.radial_actions[slot]), Some(slot))
         };
         if let Ok(bitmap) = crate::radial::compose_radial(selected, sector, settings, dpi) {
             *entry = Some(PresentedBitmap::from_premultiplied(
@@ -2974,8 +2971,7 @@ unsafe extern "system" fn window_proc(
                     // instead of waiting for the next 16 ms timer poll.
                     if event.message == WM_MOUSEMOVE
                         && SESSION.with(|cell| {
-                            cell.borrow().open
-                                && !cell.borrow().settings.disable_cursor_interaction
+                            cell.borrow().open && !cell.borrow().settings.disable_cursor_interaction
                         })
                     {
                         select_radial_cursor(hwnd, (event.point.x, event.point.y));
@@ -3081,7 +3077,12 @@ fn ipc_error_code(error: &str) -> isize {
 
 /// Keep the previous sector until the cursor moves ~4 deg past the 22.5 deg
 /// boundary. Prevents flicker when hovering on an edge; rapid flicks still switch.
-fn apply_sector_hysteresis(previous: Option<usize>, raw: Option<usize>, dx: f64, dy: f64) -> Option<usize> {
+fn apply_sector_hysteresis(
+    previous: Option<usize>,
+    raw: Option<usize>,
+    dx: f64,
+    dy: f64,
+) -> Option<usize> {
     let (Some(prev), Some(next)) = (previous, raw) else {
         return raw;
     };
@@ -3535,11 +3536,11 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, message: WPARAM, details: L
             MIDDLE_CLICK_HELD.store(false, Ordering::Release);
         }
         let wants_middle = middle_enabled && matches!(event, WM_MBUTTONDOWN | WM_MBUTTONUP);
-        let (wants_drag_event, wants_wheel, wants_radial_release, wants_radial_move) =
-            SESSION.with(|cell| {
+        let (wants_drag_event, wants_wheel, wants_radial_release, wants_radial_move) = SESSION
+            .with(|cell| {
                 let session = cell.borrow();
-                let wants_drag = session.settings.snap_on_drag
-                    || session.settings.restore_window_frame_on_drag;
+                let wants_drag =
+                    session.settings.snap_on_drag || session.settings.restore_window_frame_on_drag;
                 (
                     wants_drag && matches!(event, WM_LBUTTONDOWN | WM_LBUTTONUP)
                         || event == WM_MOUSEMOVE
@@ -3555,7 +3556,11 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, message: WPARAM, details: L
                         && !session.settings.disable_cursor_interaction,
                 )
             });
-        if wants_drag_event || wants_wheel || wants_radial_release || wants_middle || wants_radial_move
+        if wants_drag_event
+            || wants_wheel
+            || wants_radial_release
+            || wants_middle
+            || wants_radial_move
         {
             let host = HOOK_HOST.load(Ordering::Relaxed);
             if host != 0 {
@@ -4356,24 +4361,17 @@ fn update_preview() {
                 accent,
                 None,
             ) {
-                let presented = PresentedBitmap::from_premultiplied(
-                    fast.width,
-                    fast.height,
-                    &fast.pixels,
-                );
+                let presented =
+                    PresentedBitmap::from_premultiplied(fast.width, fast.height, &fast.pixels);
                 SESSION.with(|cell| {
-                    cell.borrow_mut().preview_bitmap_cache =
-                        Some((style, presented, false))
+                    cell.borrow_mut().preview_bitmap_cache = Some((style, presented, false))
                 });
                 let fast_opacity = settings.preview_opacity;
-                let fast_changed = SESSION
-                    .with(|cell| cell.borrow().preview_layer_opacity != Some(fast_opacity));
-                if fast_changed
-                    && enable_color_key(preview, fast_opacity).is_ok()
-                {
-                    SESSION.with(|cell| {
-                        cell.borrow_mut().preview_layer_opacity = Some(fast_opacity)
-                    });
+                let fast_changed =
+                    SESSION.with(|cell| cell.borrow().preview_layer_opacity != Some(fast_opacity));
+                if fast_changed && enable_color_key(preview, fast_opacity).is_ok() {
+                    SESSION
+                        .with(|cell| cell.borrow_mut().preview_layer_opacity = Some(fast_opacity));
                 }
                 present_preview(preview, target, frame, &settings);
             }
@@ -4381,7 +4379,8 @@ fn update_preview() {
                 // Deferred: the timer loop re-enters update_preview once the
                 // cursor settles and the debounce window expires.
                 let cached = SESSION.with(|cell| cell.borrow().preview_bitmap_cache.clone());
-                if let Some((_, _bitmap, _has_backdrop)) = cached.filter(|(key, _, _)| *key == style)
+                if let Some((_, _bitmap, _has_backdrop)) =
+                    cached.filter(|(key, _, _)| *key == style)
                 {
                     let desired_opacity = settings.preview_opacity;
                     if SESSION.with(|cell| cell.borrow().preview_layer_opacity)
@@ -4449,8 +4448,7 @@ fn update_preview() {
                 );
                 SESSION.with(|cell| {
                     let mut session = cell.borrow_mut();
-                    session.preview_bitmap_cache =
-                        Some((style, presented.clone(), has_backdrop));
+                    session.preview_bitmap_cache = Some((style, presented.clone(), has_backdrop));
                     session.last_preview_full_build = Some(now);
                 });
                 (presented, has_backdrop)
