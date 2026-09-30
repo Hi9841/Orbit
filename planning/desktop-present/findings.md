@@ -1,0 +1,9 @@
+# Findings
+
+- The working tree on `main` already contains edits to preview, radial, settings, tests, assets, and documentation. Preserve them.
+- The user measured correct in-memory preview pixels and failed `UpdateLayeredWindow` output. `tests/layered_present.rs` proves `SetLayeredWindowAttributes(LWA_COLORKEY)` plus `WM_PAINT` appears on this desktop.
+- `src/platform.rs` still calls removed `radial::draw_with_settings_and_sector` and `preview::update_layered_window`; `enable_color_key` is missing.
+- Loop repository: https://github.com/mrkai77/Loop . The pinned source archive `.tools/upstream-loop.zip` contains `PreviewView.swift` and `RadialMenuView.swift`. The preview uses a rounded HUD material, accent wash, light edge, and accent stroke. The radial is a 100-point ring with a direction selector; the view adds 40 points of canvas padding. Orbit's current bitmap keeps these main shapes while using an opaque light stroke and accent cap for Windows visibility.
+- The `native-feel-cross-platform-desktop` skill's T3, "Adopt the platform," supports native Win32 popup creation and painting here. Its WebView architecture does not apply to this focused native Windows renderer fix.
+- The live desktop capture in `.tools/desktop-present-live.png` shows the opaque cyan destination plate and light ring with an accent direction segment. The plate frame measured `(8,524)-(952,1024)` with current 8 px padding when the bottom-half action was aimed. A topmost test window was needed because an active fullscreen game reclaimed focus during earlier attempts.
+- The production `WM_NCHITTEST` still returns `HTTRANSPARENT`, and the live probe measured `-1`. The last completed point hit check was outside the plate; hover through an opaque plate point remains unverified after the user stopped end-to-end testing.

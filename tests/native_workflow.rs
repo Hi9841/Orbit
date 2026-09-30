@@ -81,6 +81,36 @@ fn wait_for_timeout(timeout: Duration, mut condition: impl FnMut() -> bool) {
     }
 }
 
+fn place_above(upper: HWND, lower: HWND) {
+    unsafe {
+        SetWindowPos(
+            upper,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    }
+    .unwrap();
+    assert!(
+        window_is_above(upper, lower),
+        "could not place the settings window above the marker"
+    );
+}
+
+fn window_is_above(upper: HWND, lower: HWND) -> bool {
+    let mut current = unsafe { GetWindow(upper, GW_HWNDNEXT) };
+    while let Ok(window) = current {
+        if window == lower {
+            return true;
+        }
+        current = unsafe { GetWindow(window, GW_HWNDNEXT) };
+    }
+    false
+}
+
 fn frame(window: HWND) -> (i32, i32, i32, i32) {
     let mut rect = RECT::default();
     unsafe { GetWindowRect(window, &mut rect) }.unwrap();
@@ -321,7 +351,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         assert!(unsafe { SetForegroundWindow(target).as_bool() });
         wait_for(|| unsafe { GetForegroundWindow() } == target);
         unsafe { SetCursorPos(400, 350) }.unwrap();
-        for key in [VK_CONTROL, VK_MENU, VK_SPACE] {
+        for key in [VK_CONTROL, VK_MENU] {
             key_event(key, false);
         }
         wait_for(|| unsafe { IsWindowVisible(overlay).as_bool() });
@@ -357,7 +387,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     eprintln!("native workflow: cancel radial");
     wait_for(|| !unsafe { IsWindowVisible(overlay).as_bool() });
     assert!(!unsafe { IsWindowVisible(preview).as_bool() });
-    for key in [VK_ESCAPE, VK_SPACE, VK_MENU, VK_CONTROL] {
+    for key in [VK_ESCAPE, VK_MENU, VK_CONTROL] {
         key_event(key, true);
     }
     assert_eq!(
@@ -368,7 +398,7 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     begin();
     eprintln!("native workflow: commit radial");
     wait_for(|| unsafe { IsWindowVisible(preview).as_bool() });
-    for key in [VK_SPACE, VK_MENU, VK_CONTROL] {
+    for key in [VK_MENU, VK_CONTROL] {
         key_event(key, true);
     }
     wait_for(|| !unsafe { IsWindowVisible(overlay).as_bool() });
@@ -448,6 +478,12 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     });
     let settings = unsafe { FindWindowW(w!("OrbitSettings"), None) }.unwrap();
     let sidebar = unsafe { GetDlgItem(Some(settings), 10) }.unwrap();
+    let save = unsafe { GetDlgItem(Some(settings), 14) }.unwrap();
+    assert!(
+        unsafe { IsWindowVisible(sidebar).as_bool() && IsWindowVisible(save).as_bool() },
+        "settings controls are hidden"
+    );
+    place_above(settings, target);
     let count = unsafe { SendMessageW(sidebar, LB_GETCOUNT, None, None) }.0;
     assert_eq!(count, 8, "settings pages are missing");
     for index in 0..count {
@@ -466,6 +502,14 @@ fn radial_preview_cancel_commit_undo_and_settings() {
         eprintln!("native workflow: settings page {index}");
         capture(&format!("settings-{index}"), Some(settings));
     }
+    assert!(
+        unsafe { IsWindowVisible(sidebar).as_bool() && IsWindowVisible(save).as_bool() },
+        "settings controls are hidden after paging"
+    );
+    assert!(
+        window_is_above(settings, target),
+        "settings window moved below other windows"
+    );
     eprintln!("native workflow: save settings and confirm persistence");
     let before_save = std::fs::read(&settings_path).unwrap();
     unsafe {
@@ -485,5 +529,112 @@ fn radial_preview_cancel_commit_undo_and_settings() {
     );
     unsafe { PostMessageW(Some(host), WM_CLOSE, Default::default(), Default::default()) }.unwrap();
     eprintln!("native workflow: quit resident");
+    wait_for(|| guard.child.try_wait().unwrap().is_some());
+}
+
+#[test]
+#[ignore = "opens the settings window; run explicitly with --ignored --test-threads=1"]
+fn settings_controls_remain_usable() {
+    assert!(
+        unsafe { FindWindowW(w!("OrbitWindow"), w!("Orbit")) }.is_err(),
+        "quit Orbit before the desktop test"
+    );
+    let config = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(config.path().join("Orbit")).unwrap();
+    std::fs::write(
+        config.path().join("Orbit/settings.json"),
+        br#"{"version":1,"updates_enabled":false}"#,
+    )
+    .unwrap();
+    let foreground = unsafe { GetForegroundWindow() };
+    let mut cursor = POINT::default();
+    unsafe { GetCursorPos(&mut cursor) }.unwrap();
+    let target = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("STATIC"),
+            w!("Orbit settings z-order marker"),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            80,
+            80,
+            320,
+            200,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .arg("--resident")
+        .env("LOCALAPPDATA", config.path())
+        .spawn()
+        .unwrap();
+    let mut guard = DesktopTest {
+        child,
+        target,
+        cursor,
+        foreground,
+    };
+    wait_for(|| unsafe { FindWindowW(w!("OrbitWindow"), w!("Orbit")) }.is_ok());
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_orbit"))
+            .arg("--settings")
+            .env("LOCALAPPDATA", config.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut settings = HWND::default();
+    wait_for(|| {
+        settings = unsafe { FindWindowW(w!("OrbitSettings"), None) }.unwrap_or_default();
+        !settings.0.is_null() && unsafe { IsWindowVisible(settings).as_bool() }
+    });
+    let sidebar = unsafe { GetDlgItem(Some(settings), 10) }.unwrap();
+    let save = unsafe { GetDlgItem(Some(settings), 14) }.unwrap();
+    assert!(
+        unsafe { IsWindowVisible(sidebar).as_bool() && IsWindowVisible(save).as_bool() },
+        "settings controls are hidden"
+    );
+    place_above(settings, target);
+    let count = unsafe { SendMessageW(sidebar, LB_GETCOUNT, None, None) }.0;
+    for index in 0..count {
+        unsafe {
+            SendMessageW(sidebar, LB_SETCURSEL, Some(WPARAM(index as usize)), None);
+            SendMessageW(
+                settings,
+                WM_COMMAND,
+                Some(WPARAM(10 | ((LBN_SELCHANGE as usize) << 16))),
+                Some(LPARAM(sidebar.0 as isize)),
+            );
+        }
+    }
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(settings, &mut rect) }.unwrap();
+    unsafe {
+        SetWindowPos(
+            settings,
+            None,
+            0,
+            0,
+            rect.right - rect.left + 24,
+            rect.bottom - rect.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+    .unwrap();
+    assert!(
+        unsafe { IsWindowVisible(sidebar).as_bool() && IsWindowVisible(save).as_bool() },
+        "settings controls are hidden after layout"
+    );
+    assert!(
+        window_is_above(settings, target),
+        "settings window moved below other windows"
+    );
+    if let Ok(host) = unsafe { FindWindowW(w!("OrbitWindow"), w!("Orbit")) } {
+        unsafe { PostMessageW(Some(host), WM_CLOSE, Default::default(), Default::default()) }
+            .unwrap();
+    }
     wait_for(|| guard.child.try_wait().unwrap().is_some());
 }

@@ -11,7 +11,7 @@ use orbit::{geometry::Action, settings::Settings};
 #[test]
 fn radial_pixels_are_premultiplied_and_can_be_inspected_offscreen() {
     let variants = [
-        (Settings::default(), Some(0), 96),
+        (Settings::default(), Some(1), 96),
         (
             Settings {
                 radial_corner_radius: 12,
@@ -91,15 +91,16 @@ fn preview_pixels_preserve_alpha_gradient_and_can_be_inspected_offscreen() {
     };
     assert_eq!(
         at(0, 160, 90) >> 24,
-        65,
-        "default opacity is a raw alpha byte"
+        255,
+        "the material bitmap is opaque before window opacity is applied"
     );
     assert_eq!(at(0, 2, 90) >> 24, 255, "border remains opaque");
     assert_eq!(at(0, 0, 0) >> 24, 0, "rounded corners stay transparent");
     let center = at(0, 160, 90);
-    assert_eq!((center >> 16) & 0xff, 26); // R=103 premultiplied by alpha 65
-    assert_eq!((center >> 8) & 0xff, 49); // G=193
-    assert_eq!(center & 0xff, 55); // B=214
+    assert_eq!(
+        center, 0xff35_373a,
+        "the fill uses a restrained accent wash"
+    );
     assert!((at(1, 2, 90) & 0x00ff_ffff) < (at(1, 317, 90) & 0x00ff_ffff));
 
     let system_accent = Settings {
@@ -118,7 +119,7 @@ fn preview_pixels_preserve_alpha_gradient_and_can_be_inspected_offscreen() {
         Some(0xff0000),
     )
     .unwrap();
-    assert_eq!(resolved.pixels[10 * 20 + 10], 0xffff0000);
+    assert_eq!(resolved.pixels[10 * 20 + 10], 0xff36_1f22);
 
     if let Ok(output) = std::env::var("ORBIT_PREVIEW_RENDER_OUTPUT") {
         write_bmp(&output, preview_contact_sheet(&rendered));

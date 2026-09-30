@@ -1,12 +1,5 @@
-use orbit::geometry::{Action, Rect};
+use orbit::geometry::Action;
 use orbit::settings::Settings;
-use windows::Win32::Foundation::{COLORREF, HWND, SIZE};
-use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HGDIOBJ,
-    SelectObject,
-};
-use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
 
 const CANVAS_GUTTER_PT: u32 = 80;
 
@@ -41,6 +34,7 @@ pub fn render_bitmap(
 }
 
 /// Render with an optional OS-resolved accent color while remaining independent of the desktop.
+#[cfg(test)]
 pub fn render_bitmap_with_colors(
     settings: &Settings,
     selected: Option<Action>,
@@ -74,27 +68,13 @@ pub fn render_bitmap_for_sector(
     render(settings, selected, selected_slots, dpi, None)
 }
 
-/// Draw the radial overlay as a premultiplied BGRA layered bitmap.
-pub fn draw_with_settings(
-    window: HWND,
-    selected: Option<Action>,
-    settings: &Settings,
-    dpi: u32,
-) -> Result<(), String> {
-    let bitmap =
-        render_bitmap_with_colors(settings, selected, dpi, runtime_system_accent(settings))?;
-    update_layered_window(window, bitmap)
-}
-
-/// Draw exactly one menu direction. Use this when the runtime tracks sector identity, so repeated
-/// actions in different directions remain visually distinct.
-pub fn draw_with_settings_and_sector(
-    window: HWND,
+/// Draw exactly one menu direction. Repeated actions in different directions stay distinct.
+pub fn compose_radial(
     selected_action: Option<Action>,
     selected_sector: Option<usize>,
     settings: &Settings,
     dpi: u32,
-) -> Result<(), String> {
+) -> Result<RadialBitmap, String> {
     if selected_sector.is_some_and(|sector| sector >= settings.radial_actions.len()) {
         return Err("selected radial sector is outside the eight menu directions".into());
     }
@@ -102,19 +82,18 @@ pub fn draw_with_settings_and_sector(
     if let Some(sector) = selected_sector {
         selected_slots[sector] = true;
     }
-    let bitmap = render(
+    render(
         settings,
         selected_action,
         selected_slots,
         dpi,
         runtime_system_accent(settings),
-    )?;
-    update_layered_window(window, bitmap)
+    )
 }
 
 fn render(
     settings: &Settings,
-    selected_action: Option<Action>,
+    _selected_action: Option<Action>,
     selected_slots: [bool; 8],
     dpi: u32,
     system_accent: Option<u32>,
@@ -144,6 +123,18 @@ fn render(
         .and_then(|value| value.checked_mul(value))
         .ok_or_else(|| "radial menu is too large to render".to_string())?;
     let mut pixels = vec![0u32; pixel_count];
+    let stroke_half = thickness / 2.0;
+    let centerline_half = outer - stroke_half;
+    let centerline_corner = (outer_corner - stroke_half).max(0.0);
+    let straight = centerline_half - centerline_corner;
+    let quarter_length = 2.0 * straight + std::f64::consts::FRAC_PI_2 * centerline_corner;
+    let perimeter = 4.0 * quarter_length;
+    let selected_positions: Vec<f64> = selected_slots
+        .iter()
+        .enumerate()
+        .filter(|(_, selected)| **selected)
+        .map(|(slot, _)| slot as f64 * perimeter / 8.0)
+        .collect();
 
     for y in 0..size {
         for x in 0..size {
@@ -154,41 +145,48 @@ fn render(
             // Intersect rounded outer coverage with the inverse rounded inner shape. Radius 0
             // produces a square-corner ring; radius equal to half the diameter produces a circle.
             let ring_coverage = ((-outer_distance).min(inner_distance) + 0.5).clamp(0.0, 1.0);
-            let mut color = [44.0, 49.0, 59.0];
-            let mut alpha = ring_coverage * 240.0;
-
-            if let Some(action) = selected_action {
-                let selected_color = interpolate_rgb(accent, gradient, dx / (2.0 * outer) + 0.5);
-                let angle = dy.atan2(dx);
-                let slot_count = settings.radial_actions.len() as f64;
-                for (slot, selected) in selected_slots.iter().enumerate() {
-                    if !selected {
-                        continue;
-                    }
-                    let center_angle = slot as f64 * std::f64::consts::TAU / slot_count;
-                    let delta = (angle - center_angle + std::f64::consts::PI)
-                        .rem_euclid(std::f64::consts::TAU)
-                        - std::f64::consts::PI;
-                    let angular_distance =
-                        (std::f64::consts::FRAC_PI_8 - delta.abs()) * dx.hypot(dy);
-                    let sector_coverage = (angular_distance + 0.5).clamp(0.0, 1.0);
-                    if sector_coverage > 0.0 && ring_coverage > 0.0 {
-                        color = selected_color;
-                        alpha = (ring_coverage * sector_coverage * 255.0).max(alpha);
-                        break;
+            // A restrained light edge separates the dark HUD ring from its background.
+            let edge_depth = (-outer_distance).min(inner_distance);
+            let edge_strength = (1.0 - edge_depth / (1.5 * scale)).clamp(0.0, 1.0);
+            let mut color = interpolate_rgb(0x354758, 0x718496, edge_strength * 0.7);
+            let alpha = ring_coverage * 255.0;
+            if ring_coverage > 0.0 && !selected_positions.is_empty() {
+                let position = rounded_square_path_position(
+                    dx,
+                    dy,
+                    straight,
+                    centerline_corner,
+                    quarter_length,
+                );
+                let normal = (stroke_half - edge_depth).clamp(0.0, stroke_half);
+                let rounded_end = (stroke_half * stroke_half - normal * normal)
+                    .max(0.0)
+                    .sqrt();
+                let arc_half = perimeter / 16.0;
+                let mut cap_coverage = 0.0f64;
+                let mut cap_fade = 0.0f64;
+                for center_position in &selected_positions {
+                    let delta = (position - center_position).abs();
+                    let along = delta.min(perimeter - delta);
+                    let coverage =
+                        (arc_half - stroke_half + rounded_end - along + 0.5).clamp(0.0, 1.0);
+                    if coverage > cap_coverage {
+                        cap_coverage = coverage;
+                        cap_fade = (1.0 - along / arc_half).clamp(0.0, 1.0);
                     }
                 }
-
-                // Keep the center glyph independent of ring coverage; it is visible in the
-                // transparent center and still reflects the selected frame.
-                let glyph_color = interpolate_rgb(
-                    accent,
-                    gradient,
-                    (f64::from(x) + 0.5 - center + outer) / (2.0 * outer),
-                );
-                if let Some(glyph) = glyph_pixel(x, y, center, scale, action, glyph_color) {
-                    color = glyph.0;
-                    alpha = glyph.1;
+                let cap_color = if settings.use_gradient {
+                    interpolate_rgb(accent, gradient, cap_fade)
+                } else {
+                    channels(accent)
+                };
+                for (value, cap_value) in color.iter_mut().zip(cap_color) {
+                    *value += (cap_value - *value) * cap_coverage;
+                }
+                // Loop layers the ring border over the cap. This keeps a light cap
+                // defined against a pale window without making the whole ring bright.
+                for (value, rim_value) in color.iter_mut().zip(channels(0x777b7d)) {
+                    *value += (rim_value - *value) * edge_strength * cap_coverage * 0.7;
                 }
             }
 
@@ -197,6 +195,40 @@ fn render(
     }
 
     Ok(RadialBitmap { size, pixels })
+}
+
+fn rounded_square_path_position(
+    x: f64,
+    y: f64,
+    straight: f64,
+    corner: f64,
+    quarter_length: f64,
+) -> f64 {
+    let x_abs = x.abs();
+    let y_abs = y.abs();
+    let first_quadrant = if corner <= 0.0 {
+        if x_abs >= y_abs {
+            y_abs
+        } else {
+            2.0 * straight - x_abs
+        }
+    } else if y_abs <= straight && (x_abs >= straight || x_abs >= y_abs) {
+        y_abs
+    } else if x_abs <= straight && (y_abs >= straight || y_abs > x_abs) {
+        straight + std::f64::consts::FRAC_PI_2 * corner + straight - x_abs
+    } else {
+        straight
+            + corner
+                * (y_abs - straight)
+                    .atan2(x_abs - straight)
+                    .clamp(0.0, std::f64::consts::FRAC_PI_2)
+    };
+    match (x >= 0.0, y >= 0.0) {
+        (true, true) => first_quadrant,
+        (false, true) => 2.0 * quarter_length - first_quadrant,
+        (false, false) => 2.0 * quarter_length + first_quadrant,
+        (true, false) => 4.0 * quarter_length - first_quadrant,
+    }
 }
 
 fn runtime_system_accent(settings: &Settings) -> Option<u32> {
@@ -213,74 +245,6 @@ fn runtime_system_accent(settings: &Settings) -> Option<u32> {
     }
 }
 
-fn update_layered_window(window: HWND, bitmap: RadialBitmap) -> Result<(), String> {
-    let size = bitmap.size;
-    let dc = unsafe { CreateCompatibleDC(None) };
-    if dc.0.is_null() {
-        return Err("cannot create radial drawing context".into());
-    }
-    let info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size,
-            biHeight: -size,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let mut bits = std::ptr::null_mut();
-    let bitmap_handle =
-        match unsafe { CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) } {
-            Ok(bitmap) => bitmap,
-            Err(error) => {
-                unsafe {
-                    let _ = DeleteDC(dc);
-                }
-                return Err(error.to_string());
-            }
-        };
-    if bits.is_null() {
-        unsafe {
-            let _ = DeleteObject(HGDIOBJ(bitmap_handle.0));
-            let _ = DeleteDC(dc);
-        }
-        return Err("cannot allocate radial menu bitmap".into());
-    }
-
-    let result = unsafe {
-        std::ptr::copy_nonoverlapping(
-            bitmap.pixels.as_ptr(),
-            bits.cast::<u32>(),
-            bitmap.pixels.len(),
-        );
-        let previous = SelectObject(dc, HGDIOBJ(bitmap_handle.0));
-        let result = UpdateLayeredWindow(
-            window,
-            None,
-            None,
-            Some(&SIZE { cx: size, cy: size }),
-            Some(dc),
-            None,
-            COLORREF(0),
-            Some(&BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as u8,
-                BlendFlags: 0,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as u8,
-            }),
-            ULW_ALPHA,
-        );
-        let _ = SelectObject(dc, previous);
-        let _ = DeleteObject(HGDIOBJ(bitmap_handle.0));
-        let _ = DeleteDC(dc);
-        result
-    };
-    result.map_err(|error| format!("cannot render radial menu: {error}"))
-}
-
 fn rounded_box_distance(x: f64, y: f64, half_width: f64, half_height: f64, radius: f64) -> f64 {
     let radius = radius.min(half_width).min(half_height);
     let qx = x.abs() - half_width + radius;
@@ -292,49 +256,18 @@ fn rounded_box_distance(x: f64, y: f64, half_width: f64, half_height: f64, radiu
     }
 }
 
-fn glyph_pixel(
-    x: i32,
-    y: i32,
-    center: f64,
-    scale: f64,
-    action: Action,
-    color: [f64; 3],
-) -> Option<([f64; 3], f64)> {
-    let glyph_width = (28.0 * scale).round() as i32;
-    let glyph_height = (20.0 * scale).round() as i32;
-    let left = center.round() as i32 - glyph_width / 2;
-    let top = center.round() as i32 - glyph_height / 2;
-    if x < left || x >= left + glyph_width || y < top || y >= top + glyph_height {
-        return None;
-    }
-    let border =
-        x == left || x == left + glyph_width - 1 || y == top || y == top + glyph_height - 1;
-    let inset = (2.0 * scale).round() as i32;
-    let inner_inset = (3.0 * scale).round() as i32;
-    let inner_rect = Rect {
-        left: left + inner_inset,
-        top: top + inner_inset,
-        right: left + glyph_width - inner_inset,
-        bottom: top + glyph_height - inner_inset,
-    };
-    let frame = action.frame(
-        Rect {
-            left: left + inset,
-            top: top + inset,
-            right: left + glyph_width - inset,
-            bottom: top + glyph_height - inset,
-        },
-        inner_rect,
-        0,
-    );
-    let filled = x >= frame.left && x < frame.right && y >= frame.top && y < frame.bottom;
-    (border || filled).then_some((color, if border { 210.0 } else { 255.0 }))
-}
-
 fn premultiplied_bgra(color: [f64; 3], alpha: f64) -> u32 {
     let channel = |value: f64| (value * alpha / 255.0).round() as u32;
     let alpha = alpha.round() as u32;
     (alpha << 24) | (channel(color[0]) << 16) | (channel(color[1]) << 8) | channel(color[2])
+}
+
+fn channels(color: u32) -> [f64; 3] {
+    [
+        f64::from((color >> 16) & 0xff),
+        f64::from((color >> 8) & 0xff),
+        f64::from(color & 0xff),
+    ]
 }
 
 fn interpolate_rgb(first: u32, second: u32, position: f64) -> [f64; 3] {
@@ -361,7 +294,11 @@ mod tests {
         let bitmap = render_bitmap(&settings, None, 96).unwrap();
         assert_eq!(bitmap.size, 180);
         assert_eq!(at(&bitmap, 90, 90) >> 24, 0);
-        assert!(at(&bitmap, 130, 90) >> 24 > 0);
+        assert_eq!(
+            at(&bitmap, 130, 90) >> 24,
+            255,
+            "the bitmap ring is fully covered"
+        );
         assert_eq!(at(&bitmap, 150, 90) >> 24, 0);
 
         let scaled = render_bitmap(&settings, None, 144).unwrap();
@@ -384,30 +321,83 @@ mod tests {
     }
 
     #[test]
-    fn selected_sector_uses_accent_color_and_center_glyph() {
+    fn selected_sector_is_a_brighter_cap_and_the_center_stays_open() {
         let settings = Settings::default();
         let bitmap = render_bitmap_for_sector(&settings, Some(0), 96).unwrap();
-        assert_eq!(at(&bitmap, 130, 90) & 0x00ff_ffff, 0x0067_c1d6);
-        assert_ne!(at(&bitmap, 90, 80) >> 24, 0);
+        assert_eq!(at(&bitmap, 90, 90) >> 24, 0);
+        assert_eq!(at(&bitmap, 130, 90) >> 24, 255);
+        assert_eq!(at(&bitmap, 50, 90) >> 24, 255);
+        assert!(
+            (at(&bitmap, 130, 90) & 0xff) > (at(&bitmap, 50, 90) & 0xff),
+            "the aimed arc uses the accent, the rest of the ring stays neutral"
+        );
         assert!(render_bitmap_for_sector(&settings, Some(8), 96).is_err());
     }
 
     #[test]
-    fn gradient_and_system_accent_are_resolved_before_premultiplication() {
+    fn pale_cap_retains_a_visible_outer_edge_on_a_light_window() {
+        let bitmap = render_bitmap_for_sector(&Settings::default(), Some(0), 96).unwrap();
+        let cap_middle = (at(&bitmap, 130, 90) >> 16) & 0xff;
+        let cap_edge = (at(&bitmap, 139, 90) >> 16) & 0xff;
+        assert!(cap_middle > 220);
+        assert!(cap_edge < cap_middle - 25);
+    }
+
+    #[test]
+    fn direction_cap_is_one_short_arc_on_the_stroke() {
+        let settings = Settings {
+            radial_thickness: 10,
+            ..Settings::default()
+        };
+        let bitmap = render_bitmap_for_sector(&settings, Some(0), 96).unwrap();
+        let center = f64::from(bitmap.size) / 2.0;
+        let mut radii = Vec::new();
+        let mut angles = Vec::new();
+        for y in 0..bitmap.size {
+            for x in 0..bitmap.size {
+                let pixel = at(&bitmap, x, y);
+                let red = (pixel >> 16) & 0xff;
+                let green = (pixel >> 8) & 0xff;
+                let blue = pixel & 0xff;
+                let aimed = pixel >> 24 > 200 && red > 220 && green > 220 && blue > 220;
+                if aimed {
+                    let dx = f64::from(x) + 0.5 - center;
+                    let dy = f64::from(y) + 0.5 - center;
+                    radii.push(dx.hypot(dy));
+                    angles.push(dy.atan2(dx));
+                }
+            }
+        }
+        assert!(!radii.is_empty());
+        let min_radius = radii.iter().copied().fold(f64::MAX, f64::min);
+        let max_radius = radii.iter().copied().fold(0.0, f64::max);
+        assert!(
+            min_radius > 20.0,
+            "the cap must stay on the stroke, not fill a pie"
+        );
+        assert!(
+            max_radius - min_radius < 16.0,
+            "the cap must stay thin, span {}",
+            max_radius - min_radius
+        );
+        let min_angle = angles.iter().copied().fold(f64::MAX, f64::min);
+        let max_angle = angles.iter().copied().fold(f64::MIN, f64::max);
+        assert!(max_angle - min_angle < 0.9, "the cap must be one short arc");
+    }
+
+    #[test]
+    fn system_accent_tints_the_direction_cap() {
         let settings = Settings {
             use_system_accent: true,
-            use_gradient: true,
             accent_color: 0x000000,
-            gradient_color: 0xffffff,
-            radial_actions: [Action::LeftHalf; 8],
+            radial_actions: [Action::RightHalf; 8],
             ..Settings::default()
         };
         let bitmap =
-            render_bitmap_with_colors(&settings, Some(Action::LeftHalf), 96, Some(0xff0000))
+            render_bitmap_with_colors(&settings, Some(Action::RightHalf), 96, Some(0xff0000))
                 .unwrap();
-        let left = at(&bitmap, 60, 90) & 0x00ff_ffff;
-        let right = at(&bitmap, 120, 90) & 0x00ff_ffff;
-        assert_ne!(left, right);
-        assert_eq!(left & 0x00ff_0000, 0x00ff_0000);
+        let cap = at(&bitmap, 130, 90);
+        assert_eq!(cap & 0x00ff_0000, 0x00ff_0000);
+        assert!(cap >> 24 > 100);
     }
 }

@@ -14,7 +14,7 @@ Target systems are Windows 10 22H2 and Windows 11, x64. No WebView or separate U
 
 1. Launch Orbit from the Start menu.
 2. Focus the window you want to arrange.
-3. Hold **Ctrl+Alt+Space**, move the pointer toward a side or corner, then release.
+3. Hold **Ctrl+Alt**, move the pointer toward a side or corner, then release. Change those modifiers in Settings. An optional extra key can be added there.
 4. Press **Escape** before releasing to cancel. Use **Ctrl+Alt+Z** to undo.
 
 Right-click Orbit's notification-area icon to open settings or quit. Preferences include the trigger, action shortcuts and cycles, custom frames, exclusions, snapping, radial appearance, and preview appearance.

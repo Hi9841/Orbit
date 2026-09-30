@@ -2,7 +2,9 @@
 
 ## Current development build
 
-On 2026-09-28, local `cargo test --locked --all-targets` passed 46 tests, with 3 desktop tests ignored. `cargo fmt --all` and `cargo clippy --locked --all-targets -- -D warnings` passed. Offscreen radial and preview bitmaps were rendered without opening a window. Preview opacity remains a raw 0-255 alpha byte.
+On 2026-09-28, local `cargo test --locked --all-targets` passed 46 tests, with 3 desktop tests ignored. `cargo fmt --all` and `cargo clippy --locked --all-targets -- -D warnings` passed. Offscreen radial and preview bitmaps were rendered without opening a window. At that revision, preview opacity was a raw 0-255 bitmap alpha value.
+
+On 2026-09-29, the local renderer changed to color-key Win32 paint with window-wide alpha, and fullscreen windows became excluded by default. The release executable built and started after these changes. A focused desktop probe reproduced a blocked click with `HTTRANSPARENT` alone and delivered it with `WS_EX_TRANSPARENT`; both installed Orbit popups have that style. The revised material and fullscreen exclusion have not received a full interactive workflow check.
 
 Commit `2ea7203` was checked on a GitHub-hosted Windows Server 2025 runner:
 
@@ -32,6 +34,7 @@ The following checks open windows, move the cursor, or run installer dialogs. Th
 
 ```powershell
 cargo test --test native_workflow -- --ignored --test-threads=1
+cargo test --locked --test layered_present -- --ignored --nocapture --test-threads=1
 cargo test --bin orbit -- --ignored --test-threads=1
 ./tools/Test-Installer.ps1
 ```
@@ -41,6 +44,8 @@ The installer test refuses to run when it detects existing Orbit settings, an in
 The manually dispatched packaging workflow runs that installer test on a disposable GitHub-hosted Windows runner. This does not open anything on the developer's desktop. Hosted Windows Server results do not replace Windows 10/11 and mixed-DPI acceptance checks.
 
 The native workflow test creates a disposable target, uses real key events, checks preview geometry, cancels, commits, undoes, stashes and restores through resident IPC, and tests hidden-window recovery after forced termination. It visits each settings pane and exits. It restores the pointer and previous foreground window when it finishes. Hosted runs capture the actual radial preview and settings panes; local runs never capture the desktop automatically.
+
+The layered-present probe briefly shows two popups above its own test target, moves and restores the cursor, and sends a click. It checks desktop pixels, click delivery, and the installed popups' extended styles without activating or moving a normal window.
 
 ## Release acceptance
 

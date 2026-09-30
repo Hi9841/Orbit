@@ -7,34 +7,42 @@ use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, ClientToScreen, CreateFontW,
-    CreateRectRgn, DEFAULT_CHARSET, DEFAULT_PITCH, DeleteObject, FF_DONTCARE, FW_NORMAL,
-    FW_SEMIBOLD, GetMonitorInfoW, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, ClientToScreen, CreateFontW, CreateRectRgn,
+    CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD,
+    FillRect, GetMonitorInfoW, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, OPAQUE, OUT_DEFAULT_PRECIS,
-    SetBkMode, SetWindowRgn, TRANSPARENT,
+    SetBkColor, SetBkMode, SetTextColor, SetWindowRgn,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::Dialogs::{
     CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
     OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
-use windows::Win32::UI::Controls::SetScrollInfo;
+use windows::Win32::UI::Controls::{
+    DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED, ODT_LISTBOX, SetScrollInfo, SetWindowTheme,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, GetKeyState, IsWindowEnabled, SetFocus,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON,
-    CB_ADDSTRING, CB_GETCURSEL, CB_GETITEMDATA, CB_SETCURSEL, CB_SETITEMDATA, CBS_DROPDOWNLIST,
+    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING,
+    CB_GETCURSEL, CB_GETITEMDATA, CB_SETCURSEL, CB_SETITEMDATA, CBS_DROPDOWNLIST,
     CBS_NOINTEGRALHEIGHT, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
     ES_AUTOVSCROLL, ES_MULTILINE, ES_NUMBER, ES_WANTRETURN, GetClassNameW, GetClientRect,
     GetDlgItem, GetParent, GetWindowTextLengthW, GetWindowTextW, HWND_BOTTOM, HWND_TOP, IDC_ARROW,
-    IDI_APPLICATION, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LBN_SELCHANGE, LBS_NOTIFY,
-    LoadCursorW, LoadIconW, MSG, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    IDI_APPLICATION, IsWindowVisible, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LB_SETITEMHEIGHT,
+    LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOTIFY, LBS_OWNERDRAWFIXED, LoadCursorW, LoadIconW, MSG,
+    RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
     SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DPICHANGED, WM_KEYDOWN, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GW_CHILD, GW_HWNDNEXT, GetScrollInfo, GetWindow, GetWindowRect, IsChild, SB_LINEDOWN,
@@ -52,7 +60,26 @@ const CANCEL: i32 = 15;
 const RESET: i32 = 16;
 const IMPORT: i32 = 17;
 const EXPORT: i32 = 18;
+const BRAND: i32 = 19;
+const SIDEBAR_LABEL: i32 = 20;
 const PAGE_ID_START: i32 = 1000;
+
+const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
+    COLORREF(red as u32 | ((green as u32) << 8) | ((blue as u32) << 16))
+}
+
+const COLOR_CANVAS: COLORREF = rgb(26, 28, 32);
+const COLOR_SIDEBAR: COLORREF = rgb(20, 22, 26);
+const COLOR_PANEL: COLORREF = rgb(33, 35, 39);
+const COLOR_INPUT: COLORREF = rgb(43, 45, 49);
+const COLOR_SELECTION: COLORREF = rgb(54, 57, 62);
+const COLOR_DIVIDER: COLORREF = rgb(56, 58, 62);
+const COLOR_TEXT: COLORREF = rgb(239, 238, 234);
+const COLOR_MUTED: COLORREF = rgb(169, 170, 173);
+const COLOR_ERROR: COLORREF = rgb(248, 152, 148);
+// windows-rs 0.62 does not define SS_NOPREFIX/BS_NOPREFIX; values from WinUser.h.
+const SS_NOPREFIX_RAW: u32 = 0x80;
+const BS_NOPREFIX_RAW: u32 = 0x8000;
 
 const BEHAVIOR_PADDING: i32 = 1000;
 const BEHAVIOR_SIZE_INCREMENT: i32 = 1001;
@@ -191,18 +218,26 @@ struct WindowFonts {
     title: HFONT,
 }
 
+#[derive(Clone, Copy)]
+struct WindowBrushes {
+    canvas: HBRUSH,
+    sidebar: HBRUSH,
+    panel: HBRUSH,
+    input: HBRUSH,
+    selection: HBRUSH,
+    divider: HBRUSH,
+}
+
 thread_local! {
     static WINDOW: Cell<Option<HWND>> = const { Cell::new(None) };
     static STATE: RefCell<Option<WindowState>> = const { RefCell::new(None) };
     static FONTS: Cell<Option<WindowFonts>> = const { Cell::new(None) };
+    static BRUSHES: Cell<Option<WindowBrushes>> = const { Cell::new(None) };
 }
 
 pub fn open() -> Result<(), String> {
     if let Some(hwnd) = WINDOW.with(Cell::get) {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
-        }
+        show_settings_window(hwnd);
         return Ok(());
     }
 
@@ -236,7 +271,7 @@ pub fn open() -> Result<(), String> {
                 unsafe { LoadIconW(None, IDI_APPLICATION) }.map_err(|error| error.to_string())?,
             ),
         lpszClassName: w!("OrbitSettings"),
-        hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as usize as *mut _),
+        hbrBackground: HBRUSH::default(),
         ..Default::default()
     };
     let _ = unsafe { RegisterClassW(&class) };
@@ -262,11 +297,19 @@ pub fn open() -> Result<(), String> {
     })?;
     WINDOW.with(|slot| slot.set(Some(hwnd)));
     fit_window_to_work_area(hwnd, 1020, 740);
+    show_settings_window(hwnd);
+    Ok(())
+}
+
+fn show_settings_window(hwnd: HWND) {
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
+        // The first call can be overridden by STARTUPINFO when the resident starts hidden.
+        if !IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
         let _ = SetForegroundWindow(hwnd);
     }
-    Ok(())
 }
 
 pub fn handle_dialog_message(message: &MSG) -> bool {
@@ -349,6 +392,17 @@ unsafe extern "system" fn settings_proc(
 ) -> LRESULT {
     match message {
         WM_CREATE => {
+            create_brushes();
+            let dark_mode = 1_i32;
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    (&raw const dark_mode).cast(),
+                    std::mem::size_of_val(&dark_mode) as u32,
+                )
+            };
+            let _ = unsafe { SetWindowTheme(hwnd, w!("DarkMode_Explorer"), PCWSTR::null()) };
             rebuild_fonts(hwnd);
             if let Err(error) = create_shell(hwnd) {
                 set_status(hwnd, &error);
@@ -370,20 +424,26 @@ unsafe extern "system" fn settings_proc(
             layout_page(hwnd, page);
             LRESULT(0)
         }
-        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+        WM_ERASEBKGND => {
+            let hdc = HDC(wparam.0 as *mut _);
+            paint_background(hwnd, hdc);
+            LRESULT(1)
+        }
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
             let hdc = HDC(wparam.0 as *mut _);
             let control = HWND(lparam.0 as *mut _);
-            // The combo's selection field is a child static. Transparent text redraws
-            // on top of the previous glyphs and leaves a stale first character.
-            let background = if parent_is_class(control, "ComboBox") {
-                OPAQUE
-            } else {
-                TRANSPARENT
-            };
-            unsafe {
-                let _ = SetBkMode(hdc, background);
+            let brush = control_brush(message, control, hdc);
+            LRESULT(brush.0 as isize)
+        }
+        WM_DRAWITEM => {
+            if lparam.0 != 0 {
+                let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
+                if item.CtlID == SIDEBAR as u32 && item.CtlType == ODT_LISTBOX {
+                    draw_sidebar_item(item);
+                    return LRESULT(1);
+                }
             }
-            LRESULT(HBRUSH((COLOR_WINDOW.0 + 1) as usize as *mut _).0 as isize)
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_DPICHANGED => {
             if lparam.0 != 0 {
@@ -402,6 +462,7 @@ unsafe extern "system" fn settings_proc(
                 };
             }
             rebuild_fonts(hwnd);
+            set_sidebar_item_height(hwnd);
             layout_window(hwnd);
             let page = STATE.with(|state| state.borrow().as_ref().map_or(0, |state| state.page));
             layout_page(hwnd, page);
@@ -461,6 +522,7 @@ unsafe extern "system" fn settings_proc(
             WINDOW.with(|slot| slot.set(None));
             STATE.with(|state| *state.borrow_mut() = None);
             delete_fonts();
+            delete_brushes();
             LRESULT(0)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_GETMINMAXINFO => {
@@ -479,6 +541,181 @@ unsafe extern "system" fn settings_proc(
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
+}
+
+fn create_brushes() {
+    BRUSHES.with(|slot| {
+        if slot.get().is_none() {
+            slot.set(Some(WindowBrushes {
+                canvas: unsafe { CreateSolidBrush(COLOR_CANVAS) },
+                sidebar: unsafe { CreateSolidBrush(COLOR_SIDEBAR) },
+                panel: unsafe { CreateSolidBrush(COLOR_PANEL) },
+                input: unsafe { CreateSolidBrush(COLOR_INPUT) },
+                selection: unsafe { CreateSolidBrush(COLOR_SELECTION) },
+                divider: unsafe { CreateSolidBrush(COLOR_DIVIDER) },
+            }));
+        }
+    });
+}
+
+fn delete_brushes() {
+    if let Some(brushes) = BRUSHES.with(Cell::take) {
+        for brush in [
+            brushes.canvas,
+            brushes.sidebar,
+            brushes.panel,
+            brushes.input,
+            brushes.selection,
+            brushes.divider,
+        ] {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(brush.0));
+            }
+        }
+    }
+}
+
+fn paint_background(hwnd: HWND, hdc: HDC) {
+    let mut rect = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut rect) }.is_err() {
+        return;
+    }
+    let dpi = dpi_for_window(hwnd);
+    BRUSHES.with(|slot| {
+        if let Some(brushes) = slot.get() {
+            let sidebar_width = px(214, dpi);
+            unsafe {
+                FillRect(hdc, &rect, brushes.canvas);
+                FillRect(
+                    hdc,
+                    &RECT {
+                        right: sidebar_width,
+                        ..rect
+                    },
+                    brushes.sidebar,
+                );
+                FillRect(
+                    hdc,
+                    &RECT {
+                        left: sidebar_width,
+                        right: sidebar_width + px(1, dpi),
+                        ..rect
+                    },
+                    brushes.divider,
+                );
+                FillRect(
+                    hdc,
+                    &RECT {
+                        top: rect.bottom - px(68, dpi),
+                        bottom: rect.bottom - px(67, dpi),
+                        ..rect
+                    },
+                    brushes.divider,
+                );
+            }
+        }
+    });
+}
+
+fn control_brush(message: u32, control: HWND, hdc: HDC) -> HBRUSH {
+    let id = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(control) };
+    BRUSHES.with(|slot| {
+        let Some(brushes) = slot.get() else {
+            return HBRUSH::default();
+        };
+        let (brush, background, foreground) = if message == WM_CTLCOLOREDIT {
+            (brushes.input, COLOR_INPUT, COLOR_TEXT)
+        } else if message == WM_CTLCOLORLISTBOX {
+            if id == SIDEBAR {
+                (brushes.sidebar, COLOR_SIDEBAR, COLOR_TEXT)
+            } else {
+                (brushes.input, COLOR_INPUT, COLOR_TEXT)
+            }
+        } else if id == SIDEBAR_LABEL || id == BRAND {
+            let text = if id == BRAND { COLOR_TEXT } else { COLOR_MUTED };
+            (brushes.sidebar, COLOR_SIDEBAR, text)
+        } else if matches!(id, PAGE_TITLE | PAGE_DESCRIPTION | STATUS) {
+            let text = if id == PAGE_TITLE {
+                COLOR_TEXT
+            } else {
+                COLOR_MUTED
+            };
+            (brushes.canvas, COLOR_CANVAS, text)
+        } else if parent_is_class(control, "ComboBox") {
+            (brushes.input, COLOR_INPUT, COLOR_TEXT)
+        } else if message == WM_CTLCOLORBTN && !is_group_id(id) {
+            (brushes.panel, COLOR_PANEL, COLOR_TEXT)
+        } else if id >= FIELD_ERROR_BASE
+            || matches!(id, RADIAL_ERROR | SHORTCUTS_ERROR | FRAMES_ERROR)
+        {
+            (brushes.panel, COLOR_PANEL, COLOR_ERROR)
+        } else {
+            (brushes.panel, COLOR_PANEL, COLOR_TEXT)
+        };
+        // Disabled statics keep COLOR_ERROR on COLOR_PANEL at low contrast.
+        // Mute disabled text instead of restructuring the enable logic.
+        let foreground = if !unsafe { IsWindowEnabled(control) }.as_bool() {
+            COLOR_MUTED
+        } else {
+            foreground
+        };
+        unsafe {
+            let _ = SetBkMode(hdc, OPAQUE);
+            let _ = SetBkColor(hdc, background);
+            let _ = SetTextColor(hdc, foreground);
+        }
+        brush
+    })
+}
+
+fn draw_sidebar_item(item: &DRAWITEMSTRUCT) {
+    let Some(title) = PAGE_NAMES.get(item.itemID as usize) else {
+        return;
+    };
+    BRUSHES.with(|slot| {
+        let Some(brushes) = slot.get() else {
+            return;
+        };
+        let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
+        unsafe {
+            FillRect(item.hDC, &item.rcItem, brushes.sidebar);
+            if selected {
+                let selection = RECT {
+                    left: item.rcItem.left + 4,
+                    top: item.rcItem.top + 2,
+                    right: item.rcItem.right - 4,
+                    bottom: item.rcItem.bottom - 2,
+                };
+                FillRect(item.hDC, &selection, brushes.selection);
+            }
+            let _ = SetBkMode(item.hDC, windows::Win32::Graphics::Gdi::TRANSPARENT);
+            let _ = SetTextColor(item.hDC, if selected { COLOR_TEXT } else { COLOR_MUTED });
+            let mut label = to_wide(title);
+            let label_len = label.len() - 1;
+            let mut label_rect = RECT {
+                left: item.rcItem.left + 16,
+                right: item.rcItem.right - 10,
+                ..item.rcItem
+            };
+            DrawTextW(
+                item.hDC,
+                &mut label[..label_len],
+                &mut label_rect,
+                DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+            if item.itemState.0 & ODS_FOCUS.0 != 0 {
+                // Inset to the selection rect so the dotted ring does not clash
+                // with the full-bleed item bounds (selection already signals focus).
+                let focus = RECT {
+                    left: item.rcItem.left + 4,
+                    top: item.rcItem.top + 2,
+                    right: item.rcItem.right - 4,
+                    bottom: item.rcItem.bottom - 2,
+                };
+                let _ = DrawFocusRect(item.hDC, &focus);
+            }
+        }
+    });
 }
 
 fn rebuild_fonts(hwnd: HWND) {
@@ -526,7 +763,11 @@ fn rebuild_fonts(hwnd: HWND) {
     let mut child = unsafe { GetWindow(hwnd, GW_CHILD).ok() };
     while let Some(current) = child {
         let id = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgCtrlID(current) };
-        let font = if id == PAGE_TITLE { title } else { body };
+        let font = if id == PAGE_TITLE || id == BRAND {
+            title
+        } else {
+            body
+        };
         unsafe {
             SendMessageW(
                 current,
@@ -609,7 +850,7 @@ fn content_extent(page: usize, height: i32) -> i32 {
         3 => (height - 220).max(430),
         4 => (height - 220).max(404),
         5 => (height - 220).max(296),
-        1 => (height - 212).max(450),
+        1 => (height - 220).max(450),
         2 => (height - 220).max(470),
         6 => (height - 220).max(560),
         7 => 238,
@@ -690,14 +931,16 @@ fn set_scroll_offset(hwnd: HWND, requested: i32) {
 }
 
 fn create_shell(hwnd: HWND) -> Result<(), String> {
+    create_text(hwnd, BRAND, "ORBIT")?;
+    create_text(hwnd, SIDEBAR_LABEL, "SETTINGS")?;
     child(
         hwnd,
         w!("LISTBOX"),
         w!(""),
-        WINDOW_STYLE(LBS_NOTIFY as u32) | WS_BORDER | WS_TABSTOP,
+        WINDOW_STYLE((LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS) as u32) | WS_TABSTOP,
         SIDEBAR,
     )?;
-    child(hwnd, w!("STATIC"), w!(""), WINDOW_STYLE(0x80), PAGE_TITLE)?;
+    child(hwnd, w!("STATIC"), w!(""), WINDOW_STYLE(SS_NOPREFIX_RAW), PAGE_TITLE)?;
     child(
         hwnd,
         w!("STATIC"),
@@ -710,35 +953,35 @@ fn create_shell(hwnd: HWND) -> Result<(), String> {
         hwnd,
         w!("BUTTON"),
         w!("Save"),
-        WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
+        WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32 | BS_NOPREFIX_RAW),
         SAVE,
     )?;
     child(
         hwnd,
         w!("BUTTON"),
         w!("Cancel"),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
         CANCEL,
     )?;
     child(
         hwnd,
         w!("BUTTON"),
         w!("Reset defaults"),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
         RESET,
     )?;
     child(
         hwnd,
         w!("BUTTON"),
         w!("Import…"),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
         IMPORT,
     )?;
     child(
         hwnd,
         w!("BUTTON"),
         w!("Export…"),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
         EXPORT,
     )?;
     Ok(())
@@ -751,8 +994,23 @@ fn fill_sidebar(hwnd: HWND) {
     for title in PAGE_NAMES {
         send_text(sidebar, LB_ADDSTRING, title);
     }
+    set_sidebar_item_height(hwnd);
     unsafe {
         SendMessageW(sidebar, LB_SETCURSEL, Some(WPARAM(0)), None);
+    }
+}
+
+fn set_sidebar_item_height(hwnd: HWND) {
+    if let Ok(sidebar) = unsafe { GetDlgItem(Some(hwnd), SIDEBAR) } {
+        let height = px(32, dpi_for_window(hwnd));
+        unsafe {
+            SendMessageW(
+                sidebar,
+                LB_SETITEMHEIGHT,
+                Some(WPARAM(0)),
+                Some(LPARAM(height as isize)),
+            );
+        }
     }
 }
 
@@ -784,8 +1042,9 @@ fn child(
     }
     .map_err(|error| error.to_string())?;
     unsafe {
+        let _ = SetWindowTheme(control, w!("DarkMode_Explorer"), PCWSTR::null());
         let fonts = FONTS.with(Cell::get);
-        let font = if id == PAGE_TITLE {
+        let font = if id == PAGE_TITLE || id == BRAND {
             fonts.map_or(HFONT::default(), |fonts| fonts.title)
         } else {
             fonts.map_or(HFONT::default(), |fonts| fonts.body)
@@ -808,7 +1067,7 @@ fn create_text(parent: HWND, id: i32, text: &str) -> Result<HWND, String> {
         parent,
         w!("STATIC"),
         PCWSTR(wide.as_ptr()),
-        WINDOW_STYLE(0x80), // SS_NOPREFIX: show literal ampersands in labels and page names.
+        WINDOW_STYLE(SS_NOPREFIX_RAW), // Show literal ampersands in labels and page names.
         id,
     )
 }
@@ -819,7 +1078,7 @@ fn create_button(parent: HWND, id: i32, text: &str) -> Result<HWND, String> {
         parent,
         w!("BUTTON"),
         PCWSTR(wide.as_ptr()),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
         id,
     )
 }
@@ -830,7 +1089,7 @@ fn create_checkbox(parent: HWND, id: i32, text: &str, checked: bool) -> Result<H
         parent,
         w!("BUTTON"),
         PCWSTR(wide.as_ptr()),
-        WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+        WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | BS_NOPREFIX_RAW),
         id,
     )?;
     set_checked(control, checked);
@@ -905,9 +1164,9 @@ fn create_group(parent: HWND, id: i32, title: &str) -> Result<(), String> {
     let wide = to_wide(title);
     child(
         parent,
-        w!("BUTTON"),
+        w!("STATIC"),
         PCWSTR(wide.as_ptr()),
-        WINDOW_STYLE(BS_GROUPBOX as u32),
+        WINDOW_STYLE(SS_NOPREFIX_RAW),
         id,
     )?;
     Ok(())
@@ -1039,9 +1298,9 @@ fn build_behavior(hwnd: HWND, settings: &Settings) -> Result<(), String> {
         settings.trigger.shift,
     )?;
     create_checkbox(hwnd, BEHAVIOR_TRIGGER_WIN, "Windows", settings.trigger.win)?;
-    create_text(hwnd, BEHAVIOR_TRIGGER_KEY + 1000, "Trigger key")?;
+    create_text(hwnd, BEHAVIOR_TRIGGER_KEY + 1000, "Extra key")?;
     let combo = create_combo(hwnd, BEHAVIOR_TRIGGER_KEY)?;
-    fill_key_combo(combo, settings.trigger.key);
+    fill_key_combo(combo, settings.trigger.key, true);
     create_text(hwnd, BEHAVIOR_TRIGGER_ERROR, "")?;
     create_numeric(
         hwnd,
@@ -1478,7 +1737,7 @@ fn load_shortcut_editor(hwnd: HWND, selected: Option<usize>) {
     set_checked_by_id(hwnd, SHORTCUT_SHIFT, hotkey.shift);
     set_checked_by_id(hwnd, SHORTCUT_WIN, hotkey.win);
     if let Ok(combo) = unsafe { GetDlgItem(Some(hwnd), SHORTCUT_KEY) } {
-        fill_key_combo(combo, hotkey.key);
+        fill_key_combo(combo, hotkey.key, false);
     }
     refresh_shortcut_cycle_list(hwnd);
     set_control_text(
@@ -2119,8 +2378,9 @@ fn build_about(hwnd: HWND) -> Result<(), String> {
 
 fn layout_window(hwnd: HWND) {
     let (width, height) = client_size_logical(hwnd);
-    // Keep the list above Reset. A full-height list paints its border through that button.
-    move_control(hwnd, SIDEBAR, 18, 18, 186, (height - 84).max(120));
+    move_control(hwnd, BRAND, 22, 21, 178, 25);
+    move_control(hwnd, SIDEBAR_LABEL, 22, 62, 178, 18);
+    move_control(hwnd, SIDEBAR, 14, 88, 192, (height - 174).max(120));
     raise_shell(hwnd);
     move_control(hwnd, PAGE_TITLE, 232, 18, width - 256, 34);
     move_control(hwnd, PAGE_DESCRIPTION, 232, 54, width - 256, 42);
@@ -2129,7 +2389,7 @@ fn layout_window(hwnd: HWND) {
     move_control(hwnd, CANCEL, width - 202, height - 54, 88, 30);
     move_control(hwnd, EXPORT, width - 298, height - 54, 88, 30);
     move_control(hwnd, IMPORT, width - 394, height - 54, 88, 30);
-    move_control(hwnd, RESET, 18, height - 54, 112, 30);
+    move_control(hwnd, RESET, 20, height - 54, 166, 30);
 }
 
 fn layout_page(hwnd: HWND, page: usize) {
@@ -2142,14 +2402,14 @@ fn layout_page(hwnd: HWND, page: usize) {
     match page {
         0 => {
             let column = (body_width - gap) / 2;
-            move_control(hwnd, 1700, x, body_y, column, (height - 220).max(1));
+            move_control(hwnd, 1700, x, body_y, column, (height - 232).max(1));
             move_control(
                 hwnd,
                 1701,
                 x + column + gap,
                 body_y,
                 column,
-                (height - 220).max(1),
+                (height - 232).max(1),
             );
             let row = |n: i32| body_y + 36 + n * 48;
             for (id, n) in [
@@ -2227,7 +2487,7 @@ fn layout_page(hwnd: HWND, page: usize) {
         }
         1 => {
             let half = (body_width - gap) / 2;
-            move_control(hwnd, 1710, x, body_y, body_width, (height - 220).max(1));
+            move_control(hwnd, 1710, x, body_y, body_width, (height - 232).max(1));
             move_control(
                 hwnd,
                 RADIAL_VISIBLE,
@@ -2332,7 +2592,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             );
         }
         2 => {
-            move_control(hwnd, 1720, x, body_y, body_width, (height - 220).max(1));
+            move_control(hwnd, 1720, x, body_y, body_width, (height - 232).max(1));
             move_control(
                 hwnd,
                 PREVIEW_VISIBLE,
@@ -2360,7 +2620,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             move_control(hwnd, 1721, x + 16, body_y + 318, body_width - 32, 44);
         }
         3 => {
-            move_control(hwnd, 1730, x, body_y, body_width, (height - 220).max(1));
+            move_control(hwnd, 1730, x, body_y, body_width, (height - 232).max(1));
             move_control(hwnd, 1731, x + 16, body_y + 34, body_width - 32, 24);
             let detail_x = x + 304;
             let detail_width = body_width - 320;
@@ -2445,12 +2705,12 @@ fn layout_page(hwnd: HWND, page: usize) {
                 detail_x,
                 body_y + 374,
                 detail_width,
-                30,
+                32,
             );
-            move_control(hwnd, SHORTCUT_APPLY, detail_x, body_y + 402, 148, 28);
+            move_control(hwnd, SHORTCUT_APPLY, detail_x, body_y + 410, 148, 28);
         }
         4 => {
-            move_control(hwnd, 1740, x, body_y, body_width, (height - 220).max(1));
+            move_control(hwnd, 1740, x, body_y, body_width, (height - 232).max(1));
             move_control(hwnd, 1741, x + 16, body_y + 34, body_width - 32, 24);
             move_control(hwnd, FRAME_LIST, x + 16, body_y + 70, 264, 300);
             move_control(hwnd, FRAME_NEW, x + 16, body_y + 376, 104, 28);
@@ -2480,10 +2740,10 @@ fn layout_page(hwnd: HWND, page: usize) {
             layout_numeric(hwnd, FRAME_WIDTH, form_x, body_y + 190, half);
             layout_numeric(hwnd, FRAME_HEIGHT, form_x + half + 16, body_y + 190, half);
             move_control(hwnd, FRAMES_ERROR, form_x, body_y + 242, form_width, 42);
-            move_control(hwnd, FRAME_APPLY, form_x, body_y + 294, 148, 30);
+            move_control(hwnd, FRAME_APPLY, form_x, body_y + 300, 148, 30);
         }
         5 => {
-            move_control(hwnd, 1750, x, body_y, body_width, (height - 220).max(1));
+            move_control(hwnd, 1750, x, body_y, body_width, (height - 232).max(1));
             move_control(hwnd, 1751, x + 16, body_y + 34, body_width - 32, 24);
             move_control(hwnd, 1752, x + 16, body_y + 60, body_width - 32, 24);
             move_control(
@@ -2504,7 +2764,7 @@ fn layout_page(hwnd: HWND, page: usize) {
                 x,
                 body_y,
                 column,
-                (height - 220).max(1),
+                (height - 232).max(1),
             );
             move_control(
                 hwnd,
@@ -2512,7 +2772,7 @@ fn layout_page(hwnd: HWND, page: usize) {
                 right_x,
                 body_y,
                 column,
-                (height - 220).max(1),
+                (height - 232).max(1),
             );
             layout_numeric(
                 hwnd,
@@ -2568,7 +2828,7 @@ fn layout_page(hwnd: HWND, page: usize) {
                 right_x + 16,
                 body_y + 62,
                 column - 32,
-                96,
+                200,
             );
             move_control(
                 hwnd,
@@ -2584,7 +2844,7 @@ fn layout_page(hwnd: HWND, page: usize) {
                 right_x + 16,
                 body_y + 190,
                 column - 32,
-                96,
+                200,
             );
             for (id, y) in [
                 (ADV_CYCLE_RESTART, 292),
@@ -2610,7 +2870,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             }
         }
         7 => {
-            move_control(hwnd, 1760, x, body_y, body_width, (height - 220).max(1));
+            move_control(hwnd, 1760, x, body_y, body_width, (height - 232).max(1));
             move_control(hwnd, 1761, x + 16, body_y + 38, body_width - 32, 24);
             move_control(hwnd, 1762, x + 16, body_y + 72, body_width - 32, 42);
             move_control(hwnd, ABOUT_UPDATE, x + 16, body_y + 138, 148, 30);
@@ -3127,6 +3387,7 @@ fn format_hotkey(hotkey: Hotkey) -> String {
 
 fn key_name(key: u16) -> String {
     match key {
+        0 => "Modifiers only".into(),
         0x20 => "Space".into(),
         0x0d => "Enter".into(),
         0x09 => "Tab".into(),
@@ -3143,7 +3404,7 @@ fn key_name(key: u16) -> String {
     }
 }
 
-fn fill_key_combo(hwnd: HWND, selected: u16) {
+fn fill_key_combo(hwnd: HWND, selected: u16, include_modifiers_only: bool) {
     unsafe {
         SendMessageW(
             hwnd,
@@ -3153,6 +3414,9 @@ fn fill_key_combo(hwnd: HWND, selected: u16) {
         );
     }
     let mut options = key_options();
+    if include_modifiers_only {
+        options.insert(0, (0, "Modifiers only".into()));
+    }
     if !options.iter().any(|(key, _)| *key == selected) {
         options.push((selected, format!("Virtual key 0x{selected:02X}")));
     }
@@ -3249,8 +3513,15 @@ fn action_label(action: Action, settings: &Settings) -> String {
     }
 }
 
-fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
-    if let Ok(control) = unsafe { GetDlgItem(Some(hwnd), id) } {
+/// A hidden WS_TABSTOP can retain keyboard focus, so Tab then jumps invisibly.
+/// Retreat focus to the page before hiding the focused control.
+fn retreat_focus_before_hide(parent: HWND, control: HWND) {
+    if unsafe { GetFocus() } == control {
+        let _ = unsafe { SetFocus(Some(parent)) };
+    }
+}
+
+fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {    if let Ok(control) = unsafe { GetDlgItem(Some(hwnd), id) } {
         let dpi = dpi_for_window(hwnd);
         let page_child = id >= PAGE_ID_START;
         let scrolls_with_page = page_child
@@ -3292,6 +3563,7 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
         };
         if is_group_id(id) {
             // Group frames sit behind their fields so the frame cannot erase combo text.
+            // SWP_NOOWNERZORDER keeps HWND_BOTTOM from also sinking this top-level window.
             let _ = unsafe {
                 SetWindowPos(
                     control,
@@ -3300,7 +3572,7 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
                     0,
                     0,
                     0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
                 )
             };
         }
@@ -3321,6 +3593,7 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
                         if selection_visible {
                             SW_SHOWNA
                         } else {
+                            retreat_focus_before_hide(hwnd, control);
                             SW_HIDE
                         },
                     );
@@ -3331,6 +3604,7 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
                 if visible_bottom <= visible_top {
                     unsafe {
                         let _ = SetWindowRgn(control, None, true);
+                        retreat_focus_before_hide(hwnd, control);
                         let _ = ShowWindow(control, SW_HIDE);
                     }
                 } else {
@@ -3371,6 +3645,8 @@ fn is_group_id(id: i32) -> bool {
 
 fn raise_shell(hwnd: HWND) {
     for id in [
+        BRAND,
+        SIDEBAR_LABEL,
         SIDEBAR,
         PAGE_TITLE,
         PAGE_DESCRIPTION,
@@ -3390,7 +3666,7 @@ fn raise_shell(hwnd: HWND) {
                     0,
                     0,
                     0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
                 )
             };
         }

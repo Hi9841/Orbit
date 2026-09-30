@@ -13,7 +13,7 @@ This is a development port. Implementation does not establish desktop or visual 
 | Preview | Antialiased target-frame overlay, independent border/interior opacity, gradient, corner radius, configurable starting position | Cross-monitor alignment; macOS material blur is a Windows rendering exception |
 | Shortcuts and cycles | Native binding editor, action sequences, timeout, Shift reversal, registration conflict rollback | Keyboard layout, reserved chords, rapid repeat, reload during use |
 | Frames | Halves, quarters, thirds, fourths, centering, maximize, relative move/grow/shrink/scale, custom fractional frames | Fixed-size applications, minimum sizes, taskbars, display changes |
-| Fullscreen | Monitor-filling placement without changing application window styles | Application-specific fullscreen behavior is not portable |
+| Fullscreen | Monitor-filling placement without changing application window styles | Existing fullscreen and borderless fullscreen windows are excluded by default. Application-specific fullscreen behavior is not portable. |
 | Fill available space | Source-derived finite candidate search around visible neighbors | Real application overlap and z-order scenarios |
 | Undo and initial frame | Bounded history with window identity markers and placement/style restoration | Closing/recycled windows, fullscreen, maximized and minimized state |
 | Monitor movement and focus | Next/previous and directional monitor placement; directional and stack focus | Unequal DPI, negative origins, disconnected displays |
@@ -35,8 +35,8 @@ The generated inventory is [loop-settings.json](../tests/fixtures/loop-settings.
 | --- | --- |
 | `radialMenuVisibility`, `radialMenuCornerRadius`, `radialMenuThickness`, `radialMenuActions`, `customAccentColor` | Supported native radial settings |
 | `accentColorMode`, `useGradient`, `gradientColor` | Custom/system accent and horizontal gradient |
-| `previewVisibility`, `previewPadding`, `previewCornerRadius`, `previewBackgroundAccentOpacity` | Supported; opacity uses Windows alpha units |
-| `previewBorderThickness`, `previewUseWindowCornerRadius`, `previewBackgroundEnableBlur` | Independent border and standard Windows 8-DIP corner option. Other applications' actual corner radii cannot be queried. macOS material blur is omitted because this Windows 10-compatible layered renderer has no equivalent |
+| `previewVisibility`, `previewPadding`, `previewCornerRadius`, `previewBackgroundAccentOpacity` | Supported geometry and visibility. Orbit uses Loop's default 10% accent wash; its separate preview opacity setting controls Windows layered-window translucency. |
+| `previewBorderThickness`, `previewUseWindowCornerRadius`, `previewBackgroundEnableBlur` | Independent border and standard Windows 8-DIP corner option. Other applications' actual corner radii cannot be queried. The Windows 10-compatible renderer uses a translucent HUD tint without macOS material blur. |
 | `launchAtLogin`, `windowSnapping`, `useScreenWithCursor`, `moveCursorWithWindow`, `resizeWindowUnderCursor`, `focusWindowOnResize` | Supported Windows settings |
 | `enablePadding`, `padding` | Uniform or per-edge inset; zero disables it |
 | `startHidden`, `hideMenuBarIcon` | Orbit starts without a main window; tray can be hidden and settings remain accessible through `orbit --settings` |

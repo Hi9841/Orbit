@@ -19,7 +19,7 @@ impl Default for Hotkey {
             alt: true,
             shift: false,
             win: false,
-            key: 0x20,
+            key: 0,
         }
     }
 }
@@ -153,12 +153,12 @@ impl Default for Settings {
             radial_actions: default_radial_actions(),
             custom_frames: Vec::new(),
             radial_size: 100,
-            radial_thickness: 22,
-            radial_corner_radius: 50,
-            accent_color: 0x67C1D6,
-            preview_opacity: 65,
+            radial_thickness: 14,
+            radial_corner_radius: 20,
+            accent_color: 0xF4F4F0,
+            preview_opacity: 170,
             preview_padding: 10,
-            preview_corner_radius: 10,
+            preview_corner_radius: 8,
             cycle_timeout_ms: 1000,
             trigger_delay_ms: 0,
             reverse_scroll: false,
@@ -167,7 +167,7 @@ impl Default for Settings {
             resize_window_under_cursor: false,
             focus_window_on_resize: true,
             move_cursor_with_window: false,
-            ignore_fullscreen: false,
+            ignore_fullscreen: true,
             disable_cursor_interaction: false,
             lock_radial_menu_to_center: false,
             snap_threshold: 12,
@@ -177,7 +177,7 @@ impl Default for Settings {
             use_system_accent: false,
             use_gradient: false,
             gradient_color: 0x3b82f6,
-            preview_border_thickness: 4,
+            preview_border_thickness: 2,
             preview_use_window_corner_radius: true,
             edge_padding: None,
             padding_minimum_screen_inches: 0.0,
@@ -221,6 +221,7 @@ impl Settings {
         if settings.version != 1 {
             return Err(format!("unsupported settings version {}", settings.version));
         }
+        migrate_loaded(&mut settings);
         settings.padding = settings.padding.clamp(0, 100);
         settings
             .excluded_processes
@@ -290,7 +291,7 @@ impl Settings {
         {
             return Err("snap and stash padding must be between 0 and 500".into());
         }
-        validate_hotkey(self.trigger, "trigger")?;
+        validate_hotkey(self.trigger, "trigger", true)?;
         if self.shortcuts.len() > 2048 {
             return Err("at most 2048 global shortcuts are supported".into());
         }
@@ -307,7 +308,11 @@ impl Settings {
         let mut hotkeys = HashSet::new();
         hotkeys.insert(self.trigger);
         for (index, shortcut) in self.shortcuts.iter().enumerate() {
-            validate_hotkey(shortcut.hotkey, &format!("shortcuts[{index}].hotkey"))?;
+            validate_hotkey(
+                shortcut.hotkey,
+                &format!("shortcuts[{index}].hotkey"),
+                false,
+            )?;
             if !hotkeys.insert(shortcut.hotkey) {
                 return Err("shortcut hotkeys must be unique".into());
             }
@@ -384,10 +389,27 @@ impl Settings {
     }
 }
 
-fn validate_hotkey(hotkey: Hotkey, field: &str) -> Result<(), String> {
-    if hotkey.key == 0
-        || hotkey.key > 0xff
-        || matches!(hotkey.key, 0x10 | 0x11 | 0x12 | 0x5b | 0x5c | 0xa0..=0xa5)
+fn migrate_loaded(settings: &mut Settings) {
+    // The first public default was Ctrl+Alt+Space. The trigger is now the modifiers alone.
+    if settings.trigger
+        == (Hotkey {
+            control: true,
+            alt: true,
+            shift: false,
+            win: false,
+            key: 0x20,
+        })
+    {
+        settings.trigger.key = 0;
+    }
+}
+
+fn validate_hotkey(hotkey: Hotkey, field: &str, allow_modifiers_only: bool) -> Result<(), String> {
+    let modifiers_only = allow_modifiers_only && hotkey.key == 0;
+    if !modifiers_only
+        && (hotkey.key == 0
+            || hotkey.key > 0xff
+            || matches!(hotkey.key, 0x10 | 0x11 | 0x12 | 0x5b | 0x5c | 0xa0..=0xa5))
     {
         return Err(format!("{field} requires a valid non-modifier virtual key"));
     }
@@ -416,7 +438,13 @@ mod tests {
         assert_eq!(settings.padding, 12);
         assert!(settings.radial_menu_visible);
         assert!(!settings.snap_on_drag);
-        assert_eq!(settings.trigger.key, 0x20);
+        assert!(settings.trigger.control && settings.trigger.alt);
+        assert_eq!(settings.trigger.key, 0);
+        let mut previous_default: Settings =
+            serde_json::from_str(r#"{"version":1,"trigger":{"control":true,"alt":true,"key":32}}"#)
+                .unwrap();
+        migrate_loaded(&mut previous_default);
+        assert_eq!(previous_default.trigger.key, 0);
         assert_eq!(settings.radial_size, 100);
         assert_eq!(settings.edge_padding, None);
         assert_eq!(settings.trigger_side, TriggerSide::Either);
@@ -452,6 +480,9 @@ mod tests {
         assert!(settings.validate().is_err());
         settings.custom_frames.clear();
         settings.trigger.key = 0;
+        settings.validate().unwrap();
+        settings.trigger.control = false;
+        settings.trigger.alt = false;
         assert!(settings.validate().is_err());
     }
 
