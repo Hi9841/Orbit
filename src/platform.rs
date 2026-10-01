@@ -1481,7 +1481,82 @@ fn apply_frame_action(hwnd: HWND, action: Action, settings: &Settings) -> Result
     if settings.focus_window_on_resize {
         let _ = unsafe { SetForegroundWindow(hwnd) };
     }
+    displace_after_place(hwnd, action, target, settings);
     Ok(())
+}
+
+fn displace_after_place(placed: HWND, action: Action, placed_frame: Rect, settings: &Settings) {
+    let Some(opposite) = orbit::displace::opposite_tile(action) else {
+        return;
+    };
+    let Ok(monitor) = monitor_for(placed, settings) else {
+        return;
+    };
+    let work = effective_work_area(monitor, settings);
+    // Fill the opposite tile flush. The black chooser covered this region and never moved the windows.
+    let region = opposite.frame(work, placed_frame, 0);
+    let covered = covered_windows(placed, placed_frame, monitor.handle, settings);
+    if covered.is_empty() || region.width() < 40 || region.height() < 40 {
+        return;
+    }
+    let frames = if covered.len() == 1 {
+        vec![region]
+    } else {
+        orbit::displace::column_frames(region, covered.len())
+    };
+    for (window, frame) in covered.into_iter().zip(frames) {
+        let _ = move_displaced(window, frame, settings);
+    }
+}
+
+fn covered_windows(placed: HWND, frame: Rect, monitor: HMONITOR, settings: &Settings) -> Vec<HWND> {
+    let mut windows = Vec::new();
+    unsafe {
+        let _ = EnumWindows(
+            Some(collect_window),
+            LPARAM((&mut windows as *mut Vec<HWND>) as isize),
+        );
+    }
+    let info = monitor_info(monitor).ok();
+    windows
+        .into_iter()
+        .filter(|candidate| {
+            *candidate != placed
+                && unsafe { IsWindowVisible(*candidate).as_bool() }
+                && !unsafe { IsIconic(*candidate).as_bool() }
+                && !is_protected_window(*candidate)
+                && !is_excluded(*candidate, settings).unwrap_or(true)
+                && unsafe { MonitorFromWindow(*candidate, MONITOR_DEFAULTTONEAREST) } == monitor
+                && info
+                    .as_ref()
+                    .is_none_or(|info| !is_fullscreen(*candidate, *info))
+                && !SESSION.with(|cell| {
+                    let session = cell.borrow();
+                    session
+                        .stash
+                        .iter()
+                        .chain(&session.hidden)
+                        .any(|entry| entry.window == *candidate)
+                })
+                && rect_from_window(*candidate)
+                    .is_ok_and(|rect| orbit::displace::substantially_covered(rect, frame))
+        })
+        .collect()
+}
+
+fn move_displaced(window: HWND, frame: Rect, settings: &Settings) -> Result<(), String> {
+    if unsafe { IsZoomed(window).as_bool() } {
+        unsafe {
+            let _ = ShowWindow(window, SW_RESTORE);
+        }
+    }
+    let old = rect_from_window(window)?;
+    if settings.animate_window_resizes
+        && start_window_animation(window, old, frame, settings, AnimationCompletion::None)?
+    {
+        return Ok(());
+    }
+    set_visible_frame(window, frame, Default::default())
 }
 
 fn is_fullscreen(hwnd: HWND, monitor: Monitor) -> bool {

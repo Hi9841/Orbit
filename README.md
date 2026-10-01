@@ -1,5 +1,7 @@
 # Orbit
 
+The landing page is [`site/index.html`](site/index.html).
+
 Native Windows window management in Rust using [windows-rs](https://github.com/microsoft/windows-rs). Orbit adapts [Loop](https://github.com/mrkai77/Loop)'s radial interaction and settings layout for Windows.
 
 Orbit is GPL-3.0-only. It is a separate project with its own name and icon. See [NOTICE.md](NOTICE.md) for attribution.

@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101012" />
+    <title>Orbit, native Windows window manager</title>
+    <meta
+      name="description"
+      content="Orbit places the focused window when you hold Ctrl+Alt and move toward an edge. Native Win32, per-user install, no WebView. Windows 10 22H2 and Windows 11, x64."
+    />
+    <link rel="icon" href="orbit-mark.png" type="image/png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body id="top">
+    <a class="skip" href="#content">Skip to content</a>
+
+    <header class="site-header">
+      <p class="announce">
+        <span class="shell">
+          Orbit 0.2.7. Windows 10 22H2 and Windows 11, x64. Per-user install, no administrator prompt. The executable and installer are unsigned.
+        </span>
+      </p>
+      <div class="sticky-nav">
+        <div class="bar">
+          <div class="shell bar-inner">
+            <a class="brand" href="#top">
+              <img src="orbit-mark.png" alt="" width="32" height="32" />
+              <span class="brand-name">Orbit</span>
+            </a>
+            <nav class="primary" aria-label="Primary">
+              <a href="#use">Use</a>
+              <a href="#radial">Radial</a>
+              <a href="#record">Record</a>
+              <a href="#limits">Limits</a>
+            </nav>
+            <div class="bar-end">
+              <a class="source-link" href="https://github.com/Hi9841/Orbit">Source</a>
+              <a class="cta" href="https://github.com/Hi9841/Orbit/releases">Download the installer</a>
+              <button class="menu-button" type="button" aria-expanded="false" aria-controls="site-menu">
+                Menu
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="site-menu" class="menu-panel" hidden>
+        <div class="shell menu-inner">
+          <a href="#use">Use</a>
+          <a href="#radial">Radial</a>
+          <a href="#record">Record</a>
+          <a href="#limits">Limits</a>
+          <a href="https://github.com/Hi9841/Orbit">Source</a>
+        </div>
+      </div>
+      </div>
+    </header>
+
+    <main id="content">
+      <section class="opening shell">
+        <p class="marker">Window placement</p>
+        <h1>Place the focused window by moving toward an edge.</h1>
+        <p class="lead">
+          Hold <kbd>Ctrl</kbd> and <kbd>Alt</kbd>. Move the pointer toward a side or corner, then release. Orbit draws a radial menu and a placement preview. Releasing commits the move on the monitor work area. Press <kbd>Escape</kbd> before you release to cancel. Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Z</kbd> to undo.
+        </p>
+        <p class="opening-actions">
+          <a class="cta" href="https://github.com/Hi9841/Orbit/releases">Download the installer</a>
+          <a href="https://github.com/Hi9841/Orbit/blob/main/docs/architecture.md">Read the architecture</a>
+        </p>
+      </section>
+
+      <section class="proof shell" id="radial" aria-labelledby="radial-heading">
+        <h2 id="radial-heading">Default radial menu</h2>
+        <p class="prose">
+          Version 0.2.7 ships these eight sectors. You can replace any sector in Settings. Orbit selects a sector only after the pointer travels at least 30 pixels from the trigger point.
+        </p>
+        <p class="scroll-cue">Scroll sideways to read every column.</p>
+        <div class="table-scroll" tabindex="0" aria-label="Default radial sectors">
+          <table>
+            <caption class="sr-only">
+              Default radial direction, action name, and command for Orbit 0.2.7
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Direction</th>
+                <th scope="col">Default action</th>
+                <th scope="col">Command</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Right</th>
+                <td>Right half</td>
+                <td><code>orbit right-half</code></td>
+              </tr>
+              <tr>
+                <th scope="row">Bottom right</th>
+                <td>Bottom right</td>
+                <td><code>orbit bottom-right</code></td>
+              </tr>
+              <tr>
+                <th scope="row">Bottom</th>
+                <td>Bottom half</td>
+                <td><code>orbit bottom-half</code></td>
+              </tr>
+              <tr>
+                <th scope="row">Bottom left</th>
+                <td>Bottom left</td>
+                <td><code>orbit bottom-left</code></td>
+              </tr>
+              <tr>
+                <th scope="row">Left</th>
+                <td>Left half</td>
+                <td><code>orbit left-half</code></td>
+              </tr>
+              <tr>
+                <th scope="row">Top left</th>
+                <td>Top left</td>
+                <td><code>orbit top-left</code></td>
+              </tr>
+              <tr>
+                <th scope="row">Top</th>
+                <td>Top half</td>
+                <td><code>orbit top-half</code></td>
+              </tr>
+              <tr>
+                <th scope="row">Top right</th>
+                <td>Top right</td>
+                <td><code>orbit top-right</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>Scripts</h3>
+        <pre class="commands"><code>orbit left-half
+orbit --list-actions
+orbit --status
+orbit --export-settings preferences.json
+orbit --import-settings preferences.json
+orbit --quit</code></pre>
+        <p class="prose note">
+          Use the full path to <code>orbit.exe</code> when it is not on PATH. <code>--export-settings</code> requires a new file path. Import checks the whole file before it applies the file. Exit code 0 means success. Exit code 1 means the operation failed. Exit code 2 means the arguments are invalid.
+        </p>
+      </section>
+
+      <div class="shell chapters">
+        <section class="chapter" id="use">
+          <h2>Use</h2>
+          <p>
+            Launch Orbit from the Start menu. Focus the window you want to arrange. Hold the trigger. The default trigger is <kbd>Ctrl</kbd>+<kbd>Alt</kbd>, with no extra key. Right-click the notification-area icon to open settings or quit.
+          </p>
+          <p>
+            Settings has eight pages. They are General, Radial, Preview, Shortcuts, Frames, Exclusions, Advanced, and About. A custom frame is a fraction of the monitor work area. Each edge runs from 0 to 1.
+          </p>
+          <ul class="marks">
+            <li><a href="https://github.com/Hi9841/Orbit/blob/main/README.md#use">Change the trigger</a> in Settings, including an optional extra key.</li>
+            <li>Open settings with <code>orbit --settings</code> or <code>orbit://settings</code>.</li>
+            <li>Apply a window action with <code>orbit://action/left-half</code>. URI commands are limited to window actions and opening settings.</li>
+            <li>Run <code>orbit --list-actions</code> before scripting a name.</li>
+          </ul>
+        </section>
+
+        <section class="chapter" id="resident">
+          <h2>One resident</h2>
+          <p>
+            One Win32 message loop owns the notification icon, the global shortcuts, the overlay windows, the action history, the stash, and the settings window. Placement uses the monitor work area. Orbit stores history on the live window. A recycled handle does not inherit another window's positions.
+          </p>
+          <p>
+            The settings window uses native controls. The radial menu is drawn into a layered window. Update checks run on background threads and return to the message loop. Orbit does not ship a WebView. It does not ship a separate UI runtime.
+          </p>
+          <ul class="marks">
+            <li><a href="https://github.com/Hi9841/Orbit/blob/main/docs/architecture.md">Read the architecture</a> for the process boundary and the UI choice.</li>
+            <li>Preview opacity defaults to 170. That value is the layered-window alpha, from 0 to 255.</li>
+            <li>Window-resize animation is off by default. The duration setting is 180 ms.</li>
+            <li>Fullscreen windows are ignored by default.</li>
+          </ul>
+        </section>
+
+        <section class="chapter" id="install">
+          <h2>Install and updates</h2>
+          <p>
+            The installer writes to your Programs directory. It registers notification-area launch, optional logon launch, the <code>orbit://</code> handler, and Windows uninstall metadata. It does not add a service. It does not request elevation.
+          </p>
+          <p>
+            Update manifests are signed with Ed25519. Orbit requires HTTPS. It bounds the read, rejects altered metadata, and checks the installer SHA-256. It checks the staged file again before launch. A prompt comes before the download. The executable and the installer are unsigned. Windows can show a publisher warning.
+          </p>
+          <ul class="marks">
+            <li><a href="https://github.com/Hi9841/Orbit/releases">Download a release</a> and the matching source archive.</li>
+            <li>Uninstall from Windows Settings, Apps. Preferences stay unless you delete them.</li>
+            <li>Silent uninstall keeps preferences. <code>/REMOVESETTINGS=1</code> removes them.</li>
+            <li><a href="https://github.com/Hi9841/Orbit/blob/main/docs/releases.md">Read the release guide</a> for the update manifest.</li>
+          </ul>
+        </section>
+
+        <section class="chapter" id="limits">
+          <h2>Limits</h2>
+          <p>
+            Numbered virtual-desktop moves are not included. Next and previous virtual-desktop switching are not included. Windows does not document an equivalent. Stage Manager, Dock integration, haptics, and iCloud sync stay on macOS.
+          </p>
+          <p>
+            The Fullscreen action fills the monitor. It does not enter another application's fullscreen mode. Orbit is GPL-3.0-only. It is a separate project from <a href="https://github.com/mrkai77/Loop">Loop</a>. It does not claim exact visual or behavioral parity with Loop.
+          </p>
+          <ul class="marks">
+            <li><a href="https://github.com/Hi9841/Orbit/blob/main/migration/parity.md">Read the parity checklist</a> for adaptations and excluded behavior.</li>
+            <li><a href="https://github.com/Hi9841/Orbit/blob/main/docs/verification.md">Read the verification notes</a> before you treat a hosted run as acceptance on your own PC.</li>
+            <li>Windows 10 and 11 mixed-DPI behavior still needs acceptance testing.</li>
+            <li>Screen-reader behavior still needs acceptance testing.</li>
+          </ul>
+        </section>
+      </div>
+
+      <section class="record shell" id="record" aria-labelledby="record-heading">
+        <h2 id="record-heading">Operating record</h2>
+        <p class="prose">
+          These rows are the shipped defaults and the documented checks for 0.2.7. This table is not a benchmark. It is not a customer list.
+        </p>
+        <div class="table-scroll" tabindex="0" aria-label="Operating record">
+          <table>
+            <caption class="sr-only">
+              Operating facts for Orbit 0.2.7
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Item</th>
+                <th scope="col">Record</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Version</th>
+                <td>0.2.7</td>
+              </tr>
+              <tr>
+                <th scope="row">License</th>
+                <td>GPL-3.0-only. Source for each binary release is published with that release.</td>
+              </tr>
+              <tr>
+                <th scope="row">Systems</th>
+                <td>Windows 10 22H2 and Windows 11, x64.</td>
+              </tr>
+              <tr>
+                <th scope="row">Install</th>
+                <td>Current user. No administrator permission. No WebView.</td>
+              </tr>
+              <tr>
+                <th scope="row">Preferences</th>
+                <td><code>%LOCALAPPDATA%\Orbit\settings.json</code></td>
+              </tr>
+              <tr>
+                <th scope="row">Default trigger</th>
+                <td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>, modifiers only.</td>
+              </tr>
+              <tr>
+                <th scope="row">Default undo</th>
+                <td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Z</kbd>.</td>
+              </tr>
+              <tr>
+                <th scope="row">Code signature</th>
+                <td>The executable and installer are unsigned. Update metadata uses a separate Ed25519 signature.</td>
+              </tr>
+              <tr>
+                <th scope="row">Hosted check</th>
+                <td>
+                  The verification notes record a
+                  <a href="https://github.com/Hi9841/Orbit/actions/runs/36455383244">Windows Server 2025 build check</a>
+                  and a
+                  <a href="https://github.com/Hi9841/Orbit/actions/runs/36455396233">packaging run</a>.
+                  The packaging run installed Orbit, committed a radial placement, undid it, and opened all eight settings pages. Those runs do not prove Windows 10 or 11 mixed-DPI behavior or screen-reader behavior.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell">
+        <div class="ruled-grid footer-grid">
+          <section>
+            <h2>Use</h2>
+            <ul>
+              <li><a href="https://github.com/Hi9841/Orbit/releases">Download the installer</a></li>
+              <li><a href="https://github.com/Hi9841/Orbit/blob/main/README.md#use">Usage</a></li>
+              <li><a href="https://github.com/Hi9841/Orbit/blob/main/README.md#scripts">Scripts</a></li>
+              <li><a href="#use">Settings pages</a></li>
+            </ul>
+          </section>
+          <section>
+            <h2>Build</h2>
+            <ul>
+              <li><a href="https://github.com/Hi9841/Orbit/blob/main/README.md#build-and-check">Build and check</a></li>
+              <li><a href="https://github.com/Hi9841/Orbit/blob/main/docs/architecture.md">Architecture</a></li>
+              <li><a href="https://github.com/Hi9841/Orbit/blob/main/docs/releases.md">Release guide</a></li>
+              <li><a href="https://github.com/Hi9841/Orbit/blob/main/docs/verification.md">Verification</a></li>
+            </ul>
+          </section>
+          <section>
+            <h2>Project</h2>
+            <ul>
+              <li><a href="https://github.com/Hi9841/Orbit">Source</a></li>
+              <li><a href="https://github.com/Hi9841/Orbit/blob/main/LICENSE">GPL-3.0-only</a></li>
+              <li><a href="https://github.com/Hi9841/Orbit/blob/main/NOTICE.md">Notices</a></li>
+              <li><a href="https://github.com/mrkai77/Loop">Loop</a></li>
+            </ul>
+          </section>
+          <section>
+            <h2>Checks</h2>
+            <ul>
+              <li><a href="https://github.com/Hi9841/Orbit/actions/runs/36455383244">Build check</a></li>
+              <li><a href="https://github.com/Hi9841/Orbit/actions/runs/36455396233">Package run</a></li>
+              <li><a href="https://github.com/Hi9841/Orbit/blob/main/migration/parity.md">Parity checklist</a></li>
+              <li><a href="#limits">Known limits</a></li>
+            </ul>
+          </section>
+          <div class="legal">
+            <p>
+              <a href="https://github.com/Hi9841/Orbit/blob/main/LICENSE">GPL-3.0-only</a>
+              <span aria-hidden="true">|</span>
+              <a href="https://github.com/Hi9841/Orbit/blob/main/NOTICE.md">Notices</a>
+              <span aria-hidden="true">|</span>
+              <a href="https://github.com/mrkai77/Loop">Loop</a>
+            </p>
+            <p>Orbit is a separate project. Adapted Loop material keeps its original notices. The executable and installer are unsigned.</p>
+          </div>
+        </div>
+        <p class="social">
+          <a href="https://github.com/Hi9841/Orbit">GitHub</a>
+        </p>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var button = document.querySelector(".menu-button");
+        var panel = document.getElementById("site-menu");
+        if (!button || !panel) return;
+
+        function setOpen(open, focusTarget) {
+          button.setAttribute("aria-expanded", open ? "true" : "false");
+          if (open) {
+            panel.hidden = false;
+            window.requestAnimationFrame(function () {
+              panel.dataset.open = "true";
+            });
+          } else {
+            panel.dataset.open = "false";
+            var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+            window.setTimeout(
+              function () {
+                if (button.getAttribute("aria-expanded") === "false") panel.hidden = true;
+              },
+              reduce ? 0 : 160,
+            );
+          }
+          if (focusTarget) focusTarget.focus();
+        }
+
+        button.addEventListener("click", function () {
+          var open = button.getAttribute("aria-expanded") === "true";
+          setOpen(!open, open ? null : panel.querySelector("a"));
+        });
+
+        document.addEventListener("keydown", function (event) {
+          if (event.key === "Escape" && button.getAttribute("aria-expanded") === "true") {
+            setOpen(false, button);
+          }
+        });
+
+        panel.addEventListener("click", function (event) {
+          if (event.target.closest("a")) setOpen(false, null);
+        });
+
+        var narrow = window.matchMedia("(max-width: 860px)");
+        function closeIfWide() {
+          if (!narrow.matches) setOpen(false, null);
+        }
+        if (narrow.addEventListener) narrow.addEventListener("change", closeIfWide);
+        else narrow.addListener(closeIfWide);
+      })();
+    </script>
+  </body>
+</html>
