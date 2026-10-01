@@ -34,7 +34,6 @@ The following checks open windows, move the cursor, or run installer dialogs. Th
 
 ```powershell
 cargo test --test native_workflow -- --ignored --test-threads=1
-cargo test --locked --test layered_present -- --ignored --nocapture --test-threads=1
 cargo test --bin orbit -- --ignored --test-threads=1
 ./tools/Test-Installer.ps1
 ```
@@ -44,8 +43,6 @@ The installer test refuses to run when it detects existing Orbit settings, an in
 The manually dispatched packaging workflow runs that installer test on a disposable GitHub-hosted Windows runner. This does not open anything on the developer's desktop. Hosted Windows Server results do not replace Windows 10/11 and mixed-DPI acceptance checks.
 
 The native workflow test creates a disposable target, uses real key events, checks preview geometry, cancels, commits, undoes, stashes and restores through resident IPC, and tests hidden-window recovery after forced termination. It visits each settings pane and exits. It restores the pointer and previous foreground window when it finishes. Hosted runs capture the actual radial preview and settings panes; local runs never capture the desktop automatically.
-
-The layered-present probe briefly shows two popups above its own test target, moves and restores the cursor, and sends a click. It checks desktop pixels, click delivery, and the installed popups' extended styles without activating or moving a normal window.
 
 ## Release acceptance
 

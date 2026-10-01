@@ -171,8 +171,39 @@ fn render_screen_preview_with_backdrop(
     let right = (i64::from(frame_x) + i64::from(frame_w) + 1).clamp(0, i64::from(width));
     let bottom = (i64::from(frame_y) + i64::from(frame_h) + 1).clamp(0, i64::from(height));
 
+    // Inset past the corner radius and the solid depth, plus one pixel, so this rectangle
+    // stays inside `distance <= -interior_depth` and matches the per-pixel solid color.
+    let mut hole_left = left;
+    let mut hole_top = top;
+    let mut hole_right = left;
+    let mut hole_bottom = top;
+    if let Some(color) = plain_interior {
+        let inset = (radius + interior_depth).ceil() as i64 + 1;
+        let interior_left = (i64::from(frame_x) + inset).max(left);
+        let interior_top = (i64::from(frame_y) + inset).max(top);
+        let interior_right = (i64::from(frame_x) + i64::from(frame_w) - inset).min(right);
+        let interior_bottom = (i64::from(frame_y) + i64::from(frame_h) - inset).min(bottom);
+        if interior_left < interior_right && interior_top < interior_bottom {
+            let row_width = width as usize;
+            for y in interior_top..interior_bottom {
+                let start = (y as usize) * row_width + (interior_left as usize);
+                let end = start + (interior_right - interior_left) as usize;
+                pixels[start..end].fill(color);
+            }
+            hole_left = interior_left;
+            hole_top = interior_top;
+            hole_right = interior_right;
+            hole_bottom = interior_bottom;
+        }
+    }
+
     for y in top..bottom {
-        for x in left..right {
+        let (mid_left, mid_right) = if y >= hole_top && y < hole_bottom {
+            (hole_left, hole_right)
+        } else {
+            (left, left)
+        };
+        for x in (left..mid_left).chain(mid_right..right) {
             let local_x = (x - i64::from(frame_x)) as f64;
             let local_y = (y - i64::from(frame_y)) as f64;
             let dx = local_x + 0.5 - half_width;
@@ -554,6 +585,24 @@ mod tests {
             let expected =
                 pack_premultiplied(src_over(hud, rgb(settings.accent_color), ACCENT_WASH_ALPHA));
             assert_eq!(at(&bitmap, 16, 16), expected, "opacity {opacity}");
+        }
+    }
+
+    #[test]
+    fn plain_half_screen_plate_matches_the_small_interior_and_stays_cheap() {
+        let settings = Settings::default();
+        let small = render_bitmap(&settings, Action::LeftHalf, (40, 30), 96).unwrap();
+        let started = std::time::Instant::now();
+        let plate = render_bitmap(&settings, Action::LeftHalf, (1920, 1080), 96).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(at(&plate, 960, 540), at(&small, 20, 15));
+        assert_eq!(at(&plate, 0, 0), 0);
+        if !cfg!(debug_assertions) {
+            assert!(
+                elapsed.as_millis() < 40,
+                "half-screen plate took {} ms",
+                elapsed.as_millis()
+            );
         }
     }
 }

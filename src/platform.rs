@@ -176,8 +176,14 @@ struct Session {
     preview_current_frame: Option<Rect>,
     preview_animation: Option<PreviewAnimation>,
     radial_bitmap: Option<PresentedBitmap>,
-    radial_cache_key: Option<RadialCacheKey>,
-    radial_cache: Option<Vec<Option<PresentedBitmap>>>,
+    radial_stamp: Option<crate::radial::RadialStamp>,
+    radial_stamp_key: Option<RadialCacheKey>,
+    radial_angle: Option<f64>,
+    painted_radial_bucket: Option<i16>,
+    preview_sector_since: Option<Instant>,
+    /// `None` until a settled preview has been blurred. `Some(sector)` is the
+    /// sector that blur belongs to, including `Some(None)` for an empty aim.
+    preview_blurred_sector: Option<Option<usize>>,
     last_preview_full_build: Option<Instant>,
     arrow_state: u8,
     drag: Option<DragState>,
@@ -370,44 +376,64 @@ fn radial_cache_key_for(settings: &Settings, dpi: u32) -> RadialCacheKey {
     }
 }
 
-/// Render every ring state once so the hotkey path is a cache hit plus one
-/// small blit. Pure CPU work, safe to run at startup and on settings reload.
-fn prewarm_radial_cache(settings: &Settings, dpi: u32) {
+fn system_dpi() -> u32 {
+    unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() }.max(96)
+}
+
+fn ensure_radial_stamp(settings: &Settings, dpi: u32) -> bool {
     let key = radial_cache_key_for(settings, dpi);
-    let already_warm = SESSION.with(|cell| {
+    let warm = SESSION.with(|cell| {
         let session = cell.borrow();
-        session.radial_cache_key == Some(key)
-            && session
-                .radial_cache
-                .as_ref()
-                .is_some_and(|cache| cache.iter().all(|slot| slot.is_some()))
+        session.radial_stamp_key == Some(key) && session.radial_stamp.is_some()
     });
-    if already_warm {
-        return;
+    if warm {
+        return true;
     }
-    let mut slots: Vec<Option<PresentedBitmap>> = vec![None; 9];
-    for (slot, entry) in slots.iter_mut().enumerate() {
-        let (selected, sector) = if slot == 8 {
-            (None, None)
-        } else {
-            (Some(settings.radial_actions[slot]), Some(slot))
-        };
-        if let Ok(bitmap) = crate::radial::compose_radial(selected, sector, settings, dpi) {
-            *entry = Some(PresentedBitmap::from_premultiplied(
-                bitmap.size,
-                bitmap.size,
-                &bitmap.pixels,
-            ));
-        }
-    }
+    let Ok(stamp) = crate::radial::build_stamp(settings, dpi) else {
+        return false;
+    };
     SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
-        // Keep a freshly painted frame if settings changed mid-session.
-        if session.radial_cache_key != Some(key) {
-            session.radial_cache_key = Some(key);
-            session.radial_cache = Some(slots);
-        }
+        session.radial_stamp_key = Some(key);
+        session.radial_stamp = Some(stamp);
+        session.painted_radial_bucket = None;
     });
+    true
+}
+
+/// One idle ring at the real DPI. The hotkey path then blits that stamp.
+fn prewarm_radial_cache(settings: &Settings, dpi: u32) {
+    let _ = ensure_radial_stamp(settings, dpi);
+}
+
+fn angle_bucket(angle: Option<f64>) -> i16 {
+    match angle {
+        None => i16::MIN,
+        Some(angle) => (angle.to_degrees() * 2.0)
+            .round()
+            .clamp((i16::MIN as f64) + 1.0, i16::MAX as f64) as i16,
+    }
+}
+
+fn sector_aim_angle(sector: usize) -> f64 {
+    let mut angle = sector as f64 * std::f64::consts::FRAC_PI_4;
+    if angle > std::f64::consts::PI {
+        angle -= std::f64::consts::TAU;
+    }
+    angle
+}
+
+fn remember_radial_angle(angle: Option<f64>) -> bool {
+    let bucket = angle_bucket(angle);
+    SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        if session.painted_radial_bucket == Some(bucket) {
+            return false;
+        }
+        session.painted_radial_bucket = Some(bucket);
+        session.radial_angle = angle;
+        true
+    })
 }
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -2107,31 +2133,24 @@ fn begin_radial(host: HWND, kind: TriggerKind) {
     {
         return;
     }
-    if let Err(error) = ensure_target(target, &settings) {
-        notify_error(host, &error);
-        return;
-    }
     // Fast-fail hung targets before GetWindowPlacement can block the UI thread.
     if unsafe { IsHungAppWindow(target).as_bool() } {
         notify_error(host, "the target window is not responding");
         return;
     }
-    let monitor = match monitor_for(target, &settings) {
-        Ok(monitor) => monitor,
-        Err(error) => {
-            notify_error(host, &error);
-            return;
-        }
-    };
     let origin = if settings.lock_radial_menu_to_center {
-        monitor.work.center()
+        match monitor_for(target, &settings) {
+            Ok(monitor) => monitor.work.center(),
+            Err(error) => {
+                notify_error(host, &error);
+                return;
+            }
+        }
     } else {
         (cursor.x, cursor.y)
     };
-    if let Err(error) = with_history(|history| history.capture_initial(target)) {
-        notify_error(host, &error);
-        return;
-    }
+    // Show the ring before placement capture or the preview plate. Those can
+    // block the thread; the layered window stays invisible until this paint.
     let overlay = SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
         session.target = Some(target);
@@ -2140,12 +2159,16 @@ fn begin_radial(host: HWND, kind: TriggerKind) {
         session.selected = None;
         session.selected_sector = None;
         session.radial_bitmap = None;
+        session.radial_angle = None;
+        session.painted_radial_bucket = None;
         session.arrow_state = 0;
         session.open = true;
         session.trigger_pending = false;
         session.trigger_kind = kind;
         session.trigger_wait_double_tap = false;
         session.trigger_started = Some(Instant::now());
+        session.preview_sector_since = Some(Instant::now());
+        session.preview_blurred_sector = None;
         session.last_preview_full_build = None;
         session.overlay
     });
@@ -2171,8 +2194,17 @@ fn begin_radial(host: HWND, kind: TriggerKind) {
             redraw_radial(host);
         }
         unsafe {
-            let _ = SetTimer(Some(host), TIMER_ID, 16, None);
+            let _ = SetTimer(Some(host), TIMER_ID, 8, None);
         }
+    }
+    if let Err(error) = ensure_target(target, &settings) {
+        finish_session(host, false);
+        notify_error(host, &error);
+        return;
+    }
+    if let Err(error) = with_history(|history| history.capture_initial(target)) {
+        finish_session(host, false);
+        notify_error(host, &error);
     }
 }
 
@@ -2277,7 +2309,7 @@ pub fn run() -> Result<(), String> {
     });
     // Render all ring states once at startup so the first hotkey is a cache
     // hit plus one small blit instead of a synchronous compose.
-    prewarm_radial_cache(&settings, 96);
+    prewarm_radial_cache(&settings, system_dpi());
     MIDDLE_CLICK_ENABLED.store(settings.middle_click_triggers, Ordering::Release);
     SESSION.with(|cell| cell.borrow_mut().tray_icon = Some(class.hIcon));
     if !settings.hide_tray_icon {
@@ -2933,6 +2965,7 @@ unsafe extern "system" fn window_proc(
                 }
             }
             poll_radial_arrows(hwnd);
+            maybe_upgrade_preview();
             let kind = SESSION.with(|cell| cell.borrow().trigger_kind);
             let released = match kind {
                 TriggerKind::Keyboard => !trigger_held(settings.trigger, settings.trigger_side),
@@ -3121,11 +3154,11 @@ fn select_radial_cursor(hwnd: HWND, cursor: (i32, i32)) {
     });
     let dx = f64::from(cursor.0) - f64::from(origin.0);
     let dy = f64::from(cursor.1) - f64::from(origin.1);
-    let raw_sector = if dx * dx + dy * dy < 30.0 * 30.0 {
-        None
-    } else {
-        Some(((dy.atan2(dx) / std::f64::consts::FRAC_PI_4).round() as i32).rem_euclid(8) as usize)
-    };
+    let aimed = dx * dx + dy * dy >= 30.0 * 30.0;
+    let angle = aimed.then_some(dy.atan2(dx));
+    let raw_sector = angle
+        .map(|angle| ((angle / std::f64::consts::FRAC_PI_4).round() as i32).rem_euclid(8) as usize);
+    let aim_moved = remember_radial_angle(angle);
     let sector = SESSION.with(|cell| {
         let session = cell.borrow();
         apply_sector_hysteresis(session.selected_sector, raw_sector, dx, dy)
@@ -3139,8 +3172,12 @@ fn select_radial_cursor(hwnd: HWND, cursor: (i32, i32)) {
         session.selected_sector = sector;
         session.selected = next;
         session.trigger_started = Some(Instant::now());
+        session.preview_sector_since = Some(Instant::now());
         true
     });
+    if aim_moved {
+        redraw_radial(hwnd);
+    }
     if changed {
         let (overlay, visible, hide_no_selection) = SESSION.with(|cell| {
             let session = cell.borrow();
@@ -3162,26 +3199,27 @@ fn select_radial_cursor(hwnd: HWND, cursor: (i32, i32)) {
                 }
             }
         }
-        redraw_radial(hwnd);
+        if !aim_moved {
+            redraw_radial(hwnd);
+        }
         update_preview();
     }
 }
 
 fn redraw_radial(host: HWND) {
-    let (overlay, selected, sector, settings, target) = SESSION.with(|cell| {
+    let (overlay, settings, target, angle) = SESSION.with(|cell| {
         let session = cell.borrow();
         (
             session.overlay,
-            session.selected,
-            session.selected_sector,
             session.settings.clone(),
             session.target,
+            session.radial_angle,
         )
     });
     if let Some(overlay) = overlay {
         let dpi = target
             .map(|window| unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(window) })
-            .unwrap_or(96)
+            .unwrap_or_else(system_dpi)
             .max(96);
         // A monitor/DPI change mid-drag leaves the window at the old size and
         // forces a blurry StretchDIBits path. Re-seat it before painting.
@@ -3203,49 +3241,24 @@ fn redraw_radial(host: HWND) {
                 );
             }
         }
-        let key = radial_cache_key_for(&settings, dpi);
-        let slot = sector.unwrap_or(8);
-        if let Some(cached) = SESSION.with(|cell| {
-            let session = cell.borrow();
-            if session.radial_cache_key == Some(key) {
-                session
-                    .radial_cache
-                    .as_ref()
-                    .and_then(|cache| cache.get(slot).cloned().flatten())
-            } else {
-                None
-            }
-        }) {
-            SESSION.with(|cell| cell.borrow_mut().radial_bitmap = Some(cached));
-            unsafe {
-                let _ = InvalidateRect(Some(overlay), None, false);
-                let _ = UpdateWindow(overlay);
-            }
+        if !ensure_radial_stamp(&settings, dpi) {
+            notify_error(host, "cannot draw the radial menu");
             return;
         }
-        match crate::radial::compose_radial(selected, sector, &settings, dpi) {
-            Ok(bitmap) => {
-                let presented =
-                    PresentedBitmap::from_premultiplied(bitmap.size, bitmap.size, &bitmap.pixels);
-                SESSION.with(|cell| {
-                    let mut session = cell.borrow_mut();
-                    if session.radial_cache_key != Some(key) {
-                        session.radial_cache_key = Some(key);
-                        session.radial_cache = Some(vec![None; 9]);
-                    }
-                    if let Some(cache) = session.radial_cache.as_mut()
-                        && let Some(entry) = cache.get_mut(slot)
-                    {
-                        *entry = Some(presented.clone());
-                    }
-                    session.radial_bitmap = Some(presented);
-                });
-                unsafe {
-                    let _ = InvalidateRect(Some(overlay), None, false);
-                    let _ = UpdateWindow(overlay);
-                }
-            }
-            Err(error) => notify_error(host, &error),
+        let pixels = SESSION.with(|cell| {
+            cell.borrow()
+                .radial_stamp
+                .as_ref()
+                .map(|stamp| crate::radial::paint_stamp(stamp, angle))
+        });
+        let Some(pixels) = pixels else {
+            return;
+        };
+        let presented = PresentedBitmap::from_premultiplied(expected, expected, &pixels);
+        SESSION.with(|cell| cell.borrow_mut().radial_bitmap = Some(presented));
+        unsafe {
+            let _ = InvalidateRect(Some(overlay), None, false);
+            let _ = UpdateWindow(overlay);
         }
     }
 }
@@ -3267,9 +3280,11 @@ fn handle_wheel_event(host: HWND, delta: i32) {
         session.selected_sector = Some(sector);
         session.selected = Some(session.settings.radial_actions[sector]);
         session.trigger_started = Some(Instant::now());
-        Some(())
+        session.preview_sector_since = Some(Instant::now());
+        Some(sector)
     });
-    if changed.is_some() {
+    if let Some(sector) = changed {
+        let _ = remember_radial_angle(Some(sector_aim_angle(sector)));
         redraw_radial(host);
         update_preview();
     }
@@ -3291,9 +3306,11 @@ fn select_radial_arrow(host: HWND, sector: usize) {
         session.selected_sector = Some(sector);
         session.selected = next;
         session.trigger_started = Some(Instant::now());
+        session.preview_sector_since = Some(Instant::now());
         true
     });
     if changed {
+        let _ = remember_radial_angle(Some(sector_aim_angle(sector)));
         redraw_radial(host);
         update_preview();
     }
@@ -3958,8 +3975,9 @@ pub fn reload_settings() -> Result<(), String> {
         let mut session = cell.borrow_mut();
         session.drag = None;
         session.preview_bitmap_cache = None;
-        session.radial_cache_key = None;
-        session.radial_cache = None;
+        session.radial_stamp = None;
+        session.radial_stamp_key = None;
+        session.painted_radial_bucket = None;
     });
     unregister_hotkeys(host);
     let shortcuts = match register_hotkeys(host, &next) {
@@ -3992,7 +4010,7 @@ pub fn reload_settings() -> Result<(), String> {
         session.shortcuts = shortcuts;
         session.last_preview_full_build = None;
     });
-    prewarm_radial_cache(&next, 96);
+    prewarm_radial_cache(&next, system_dpi());
     MIDDLE_CLICK_ENABLED.store(next.middle_click_triggers, Ordering::Release);
     unsafe {
         let _ = KillTimer(Some(host), UPDATE_TIMER_ID);
@@ -4162,24 +4180,18 @@ fn initial_preview_frame(target: Rect, window: HWND, settings: &Settings) -> Rec
 
 fn present_preview(preview: HWND, window: HWND, target: Rect, settings: &Settings) {
     let now = Instant::now();
-    let (host, current, already_aimed, retargeting_fast) = SESSION.with(|cell| {
+    let (host, current, already_aimed) = SESSION.with(|cell| {
         let session = cell.borrow();
         let current = session
             .preview_animation
             .map(|animation| animation.frame_at(now).0)
             .or(session.preview_current_frame);
-        let retargeting_fast = session.preview_animation.is_some_and(|animation| {
-            animation.to != target
-                && now.saturating_duration_since(animation.started)
-                    < std::time::Duration::from_millis(80)
-        });
         (
             session.host,
             current,
             session
                 .preview_animation
                 .is_some_and(|animation| animation.to == target),
-            retargeting_fast,
         )
     });
     if already_aimed {
@@ -4196,8 +4208,10 @@ fn present_preview(preview: HWND, window: HWND, target: Rect, settings: &Setting
     // A second retarget within 80 ms snaps: chasing a moving cursor with a
     // fresh 180 ms ease on every flick is what made the preview lag the ring.
     let is_first_show = current.is_none();
-    let animate =
-        !is_first_show && !retargeting_fast && start != target && animations_allowed(settings);
+    // First show is instant. Later aims ease from the current frame so the
+    // plate follows the pointer instead of snapping between zones.
+    let animate = !is_first_show && start != target && animations_allowed(settings);
+    let follow_ms = u64::from(settings.animation_duration_ms.clamp(1, 90));
     SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
         session.preview_current_frame = Some(if animate { start } else { target });
@@ -4205,9 +4219,7 @@ fn present_preview(preview: HWND, window: HWND, target: Rect, settings: &Setting
             from: start,
             to: target,
             started: now,
-            duration: std::time::Duration::from_millis(u64::from(
-                settings.animation_duration_ms.min(200),
-            )),
+            duration: std::time::Duration::from_millis(follow_ms),
         });
     });
     let frame = if animate { start } else { target };
@@ -4226,7 +4238,7 @@ fn present_preview(preview: HWND, window: HWND, target: Rect, settings: &Setting
         let _ = UpdateWindow(preview);
         if let Some(host) = host {
             if animate {
-                let _ = SetTimer(Some(host), PREVIEW_ANIMATION_TIMER_ID, 16, None);
+                let _ = SetTimer(Some(host), PREVIEW_ANIMATION_TIMER_ID, 8, None);
             } else {
                 let _ = KillTimer(Some(host), PREVIEW_ANIMATION_TIMER_ID);
             }
@@ -4274,6 +4286,25 @@ fn advance_preview_animation(host: HWND) {
 }
 
 fn update_preview() {
+    update_preview_with(false);
+}
+
+fn maybe_upgrade_preview() {
+    let ready = SESSION.with(|cell| {
+        let session = cell.borrow();
+        session.open
+            && session.selected.is_some()
+            && session.preview_blurred_sector != Some(session.selected_sector)
+            && session
+                .preview_sector_since
+                .is_some_and(|started| started.elapsed() >= std::time::Duration::from_millis(140))
+    });
+    if ready {
+        update_preview_with(true);
+    }
+}
+
+fn update_preview_with(allow_full: bool) {
     let (preview, selection, settings) = SESSION.with(|cell| {
         let session = cell.borrow();
         let selection = if session.open {
@@ -4334,7 +4365,9 @@ fn update_preview() {
     };
     let cached = SESSION
         .with(|cell| cell.borrow().preview_bitmap_cache.clone())
-        .filter(|(cached_key, _, _)| *cached_key == style);
+        .filter(|(cached_key, _, has_backdrop)| {
+            *cached_key == style && (!allow_full || *has_backdrop)
+        });
     let bitmap = match cached {
         Some((_, bitmap, has_backdrop)) => Ok((bitmap, has_backdrop)),
         None => {
@@ -4375,6 +4408,14 @@ fn update_preview() {
                 }
                 present_preview(preview, target, frame, &settings);
             }
+            if !allow_full {
+                if let Some(overlay) = SESSION.with(|cell| cell.borrow().overlay)
+                    && unsafe { IsWindowVisible(overlay).as_bool() }
+                {
+                    raise_layered_above_foreground(overlay);
+                }
+                return;
+            }
             if !full_due {
                 // Deferred: the timer loop re-enters update_preview once the
                 // cursor settles and the debounce window expires.
@@ -4401,34 +4442,12 @@ fn update_preview() {
                 }
                 // Fast render failed: fall through to the full build attempt.
             }
-            let overlay = SESSION.with(|cell| cell.borrow().overlay);
-            let overlay_visible =
-                overlay.is_some_and(|window| unsafe { IsWindowVisible(window).as_bool() });
-            // Only hide the overlay when it actually overlaps the capture rect.
-            // Otherwise keep the ring visible to avoid a flash on every new zone.
-            let overlay_overlaps = overlay.is_some_and(|window| {
-                let mut rect = RECT::default();
-                if unsafe { GetWindowRect(window, &mut rect) }.is_err() {
-                    return true;
-                }
-                rect.left < frame.right
-                    && rect.right > frame.left
-                    && rect.top < frame.bottom
-                    && rect.bottom > frame.top
-            });
-            let hide_overlay = overlay_visible && overlay_overlaps;
+            // Keep the ring up. Hiding it for the blur reads as a late shortcut,
+            // because the show is not presented until this thread pumps again.
             unsafe {
                 let _ = ShowWindow(preview, SW_HIDE);
-                if hide_overlay && let Some(window) = overlay {
-                    let _ = ShowWindow(window, SW_HIDE);
-                }
             }
             let captured = capture_screen_rect(frame);
-            if hide_overlay && let Some(window) = overlay {
-                unsafe {
-                    let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
-                }
-            }
             let backdrop = captured
                 .and_then(|pixels| crate::preview::blur_backdrop(&pixels, width, height).ok());
             let has_backdrop = backdrop.is_some();
@@ -4450,6 +4469,7 @@ fn update_preview() {
                     let mut session = cell.borrow_mut();
                     session.preview_bitmap_cache = Some((style, presented.clone(), has_backdrop));
                     session.last_preview_full_build = Some(now);
+                    session.preview_blurred_sector = Some(session.selected_sector);
                 });
                 (presented, has_backdrop)
             })
@@ -4739,40 +4759,6 @@ mod tests {
         };
         assert_eq!(retargeted.frame_at(now + duration / 2).0, midway);
         assert_eq!(retargeted.frame_at(now + duration * 2).0, next);
-    }
-
-    #[test]
-    #[ignore = "local render timing diagnostic"]
-    fn profile_preview_frame() {
-        let width = 944;
-        let height = 1016;
-        let screen: Vec<u32> = (0..width * height)
-            .map(|index| 0xff20_3040 | ((index as u32) & 0x1f))
-            .collect();
-        let settings = Settings::default();
-        for sample in 0..5 {
-            let started = Instant::now();
-            let backdrop = crate::preview::blur_backdrop(&screen, width, height).unwrap();
-            let blurred = started.elapsed();
-            let bitmap = crate::preview::render_bitmap_with_backdrop(
-                &settings,
-                Action::RightHalf,
-                (width as u32, height as u32),
-                96,
-                None,
-                Some(&backdrop),
-            )
-            .unwrap();
-            let rendered = started.elapsed() - blurred;
-            let _: Vec<_> = bitmap.pixels.iter().copied().map(color_key_pixel).collect();
-            let converted = started.elapsed() - blurred - rendered;
-            println!(
-                "sample={sample} blur_ms={:.2} render_ms={:.2} convert_ms={:.2}",
-                blurred.as_secs_f64() * 1000.0,
-                rendered.as_secs_f64() * 1000.0,
-                converted.as_secs_f64() * 1000.0
-            );
-        }
     }
 
     #[test]

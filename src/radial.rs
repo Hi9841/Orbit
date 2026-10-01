@@ -69,6 +69,8 @@ pub fn render_bitmap_for_sector(
 }
 
 /// Draw exactly one menu direction. Repeated actions in different directions stay distinct.
+/// The live ring uses `paint_stamp` so the cap can sit between those directions.
+#[allow(dead_code)]
 pub fn compose_radial(
     selected_action: Option<Action>,
     selected_sector: Option<usize>,
@@ -82,13 +84,18 @@ pub fn compose_radial(
     if let Some(sector) = selected_sector {
         selected_slots[sector] = true;
     }
-    render(
+    let bitmap = render(
         settings,
         selected_action,
         selected_slots,
         dpi,
         runtime_system_accent(settings),
-    )
+    )?;
+    let expected = (bitmap.size as usize).saturating_mul(bitmap.size as usize);
+    if bitmap.pixels.len() != expected {
+        return Err("radial bitmap size does not match its pixels".into());
+    }
+    Ok(bitmap)
 }
 
 fn render(
@@ -270,6 +277,238 @@ fn channels(color: u32) -> [f64; 3] {
     ]
 }
 
+#[derive(Clone)]
+pub struct RingSample {
+    pub index: u32,
+    pub position: f32,
+    pub edge_strength: f32,
+    pub rounded_end: f32,
+    pub alpha: f32,
+    pub color: [f32; 3],
+}
+
+/// Idle ring plus the samples needed to slide the direction cap.
+#[derive(Clone)]
+pub struct RadialStamp {
+    pub size: i32,
+    pub idle: Vec<u32>,
+    pub perimeter: f64,
+    pub samples: Vec<RingSample>,
+    pub accent: u32,
+    pub gradient: u32,
+    pub use_gradient: bool,
+    pub straight: f64,
+    pub centerline_corner: f64,
+    pub centerline_half: f64,
+    pub stroke_half: f64,
+}
+
+struct RadialMetrics {
+    size: i32,
+    scale: f64,
+    center: f64,
+    outer: f64,
+    inner: f64,
+    outer_corner: f64,
+    inner_corner: f64,
+    accent: u32,
+    gradient: u32,
+    stroke_half: f64,
+    straight: f64,
+    centerline_corner: f64,
+    centerline_half: f64,
+    perimeter: f64,
+}
+
+fn metrics(
+    settings: &Settings,
+    dpi: u32,
+    system_accent: Option<u32>,
+) -> Result<RadialMetrics, String> {
+    let dpi = dpi.max(48);
+    let size = window_size_px(settings, dpi);
+    let scale = f64::from(dpi) / 96.0;
+    let center = f64::from(size) / 2.0;
+    let outer = f64::from(radial_size_px(settings, dpi)) / 2.0;
+    let thickness =
+        (f64::from(settings.radial_thickness.max(1)) * scale).clamp(1.0, outer.max(1.0));
+    let inner = (outer - thickness).max(0.0);
+    let outer_corner = (f64::from(settings.radial_corner_radius) * scale).min(outer);
+    let inner_corner = (outer_corner - thickness).max(0.0).min(inner);
+    let accent = (if settings.use_system_accent {
+        system_accent.unwrap_or(settings.accent_color)
+    } else {
+        settings.accent_color
+    }) & 0x00ff_ffff;
+    let gradient = if settings.use_gradient {
+        settings.gradient_color & 0x00ff_ffff
+    } else {
+        accent
+    };
+    let stroke_half = thickness / 2.0;
+    let centerline_half = outer - stroke_half;
+    let centerline_corner = (outer_corner - stroke_half).max(0.0);
+    let straight = centerline_half - centerline_corner;
+    let quarter_length = 2.0 * straight + std::f64::consts::FRAC_PI_2 * centerline_corner;
+    Ok(RadialMetrics {
+        size,
+        scale,
+        center,
+        outer,
+        inner,
+        outer_corner,
+        inner_corner,
+        accent,
+        gradient,
+        stroke_half,
+        straight,
+        centerline_corner,
+        centerline_half,
+        perimeter: 4.0 * quarter_length,
+    })
+}
+
+/// Build the idle ring once. Later frames only recolor samples near the cursor.
+pub fn build_stamp(settings: &Settings, dpi: u32) -> Result<RadialStamp, String> {
+    let metrics = metrics(settings, dpi, runtime_system_accent(settings))?;
+    let pixel_count = usize::try_from(metrics.size)
+        .ok()
+        .and_then(|value| value.checked_mul(value))
+        .ok_or_else(|| "radial menu is too large to render".to_string())?;
+    let mut idle = vec![0u32; pixel_count];
+    let mut samples = Vec::new();
+    for y in 0..metrics.size {
+        for x in 0..metrics.size {
+            let dx = f64::from(x) + 0.5 - metrics.center;
+            let dy = f64::from(y) + 0.5 - metrics.center;
+            if dx.abs().max(dy.abs()) > metrics.outer + 1.5 {
+                continue;
+            }
+            let outer_distance =
+                rounded_box_distance(dx, dy, metrics.outer, metrics.outer, metrics.outer_corner);
+            let inner_distance =
+                rounded_box_distance(dx, dy, metrics.inner, metrics.inner, metrics.inner_corner);
+            let ring_coverage = ((-outer_distance).min(inner_distance) + 0.5).clamp(0.0, 1.0);
+            let edge_depth = (-outer_distance).min(inner_distance);
+            let edge_strength = (1.0 - edge_depth / (1.5 * metrics.scale)).clamp(0.0, 1.0);
+            let color = interpolate_rgb(0x354758, 0x718496, edge_strength * 0.7);
+            let alpha = ring_coverage * 255.0;
+            let index = (y * metrics.size + x) as usize;
+            idle[index] = premultiplied_bgra(color, alpha);
+            if ring_coverage <= 0.0 {
+                continue;
+            }
+            let position = rounded_square_path_position(
+                dx,
+                dy,
+                metrics.straight,
+                metrics.centerline_corner,
+                metrics.perimeter / 4.0,
+            );
+            let normal = (metrics.stroke_half - edge_depth).clamp(0.0, metrics.stroke_half);
+            let rounded_end = (metrics.stroke_half * metrics.stroke_half - normal * normal)
+                .max(0.0)
+                .sqrt();
+            samples.push(RingSample {
+                index: index as u32,
+                position: position as f32,
+                edge_strength: edge_strength as f32,
+                rounded_end: rounded_end as f32,
+                alpha: alpha as f32,
+                color: [color[0] as f32, color[1] as f32, color[2] as f32],
+            });
+        }
+    }
+    Ok(RadialStamp {
+        size: metrics.size,
+        idle,
+        perimeter: metrics.perimeter,
+        samples,
+        accent: metrics.accent,
+        gradient: metrics.gradient,
+        use_gradient: settings.use_gradient,
+        straight: metrics.straight,
+        centerline_corner: metrics.centerline_corner,
+        centerline_half: metrics.centerline_half,
+        stroke_half: metrics.stroke_half,
+    })
+}
+
+fn position_at_angle(stamp: &RadialStamp, angle: f64) -> f64 {
+    let (sin, cos) = angle.sin_cos();
+    let mut lo = 0.0;
+    let mut hi = stamp.centerline_half * 2.0 + 2.0;
+    for _ in 0..24 {
+        let mid = (lo + hi) * 0.5;
+        let distance = rounded_box_distance(
+            cos * mid,
+            sin * mid,
+            stamp.centerline_half,
+            stamp.centerline_half,
+            stamp.centerline_corner,
+        );
+        if distance > 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let radius = (lo + hi) * 0.5;
+    rounded_square_path_position(
+        cos * radius,
+        sin * radius,
+        stamp.straight,
+        stamp.centerline_corner,
+        stamp.perimeter / 4.0,
+    )
+}
+
+/// `angle` is `dy.atan2(dx)` with y growing downward. `None` leaves the ring idle.
+pub fn paint_stamp(stamp: &RadialStamp, angle: Option<f64>) -> Vec<u32> {
+    let mut pixels = stamp.idle.clone();
+    let Some(angle) = angle else {
+        return pixels;
+    };
+    let width = stamp.size as usize;
+    if width == 0 || pixels.len() != width * width {
+        return pixels;
+    }
+    let center_position = position_at_angle(stamp, angle);
+    let arc_half = stamp.perimeter / 16.0;
+    let window = arc_half + stamp.stroke_half + 1.0;
+    for sample in &stamp.samples {
+        let delta = (f64::from(sample.position) - center_position).abs();
+        let along = delta.min(stamp.perimeter - delta);
+        if along > window {
+            continue;
+        }
+        let coverage = (arc_half - stamp.stroke_half + f64::from(sample.rounded_end) - along + 0.5)
+            .clamp(0.0, 1.0);
+        if coverage <= 0.0 {
+            continue;
+        }
+        let cap_fade = (1.0 - along / arc_half).clamp(0.0, 1.0);
+        let cap_color = if stamp.use_gradient {
+            interpolate_rgb(stamp.accent, stamp.gradient, cap_fade)
+        } else {
+            channels(stamp.accent)
+        };
+        let mut color = [
+            f64::from(sample.color[0]),
+            f64::from(sample.color[1]),
+            f64::from(sample.color[2]),
+        ];
+        for (value, cap_value) in color.iter_mut().zip(cap_color) {
+            *value += (cap_value - *value) * coverage;
+        }
+        for (value, rim_value) in color.iter_mut().zip(channels(0x777b7d)) {
+            *value += (rim_value - *value) * f64::from(sample.edge_strength) * coverage * 0.7;
+        }
+        pixels[sample.index as usize] = premultiplied_bgra(color, f64::from(sample.alpha));
+    }
+    pixels
+}
+
 fn interpolate_rgb(first: u32, second: u32, position: f64) -> [f64; 3] {
     let t = position.clamp(0.0, 1.0);
     let channel = |shift: u32| {
@@ -399,5 +638,36 @@ mod tests {
         let cap = at(&bitmap, 130, 90);
         assert_eq!(cap & 0x00ff_0000, 0x00ff_0000);
         assert!(cap >> 24 > 100);
+    }
+
+    #[test]
+    fn stamp_cap_follows_the_cursor_angle_instead_of_snapping_early() {
+        let settings = Settings::default();
+        let stamp = build_stamp(&settings, 96).unwrap();
+        let east = paint_stamp(&stamp, Some(0.0));
+        let nudged = paint_stamp(&stamp, Some(10.0_f64.to_radians()));
+        let idle = paint_stamp(&stamp, None);
+        let at = |pixels: &[u32], x: i32, y: i32| pixels[(y * stamp.size + x) as usize];
+        assert!(
+            (at(&east, 130, 90) & 0xff) > (at(&east, 50, 90) & 0xff),
+            "angle 0 aims the cap east"
+        );
+        assert_ne!(east, nudged, "a 10 degree move must slide the cap");
+        assert_eq!(idle, stamp.idle);
+        for sector in [0usize, 2, 4, 6] {
+            let mut angle = sector as f64 * std::f64::consts::FRAC_PI_4;
+            if angle > std::f64::consts::PI {
+                angle -= std::f64::consts::TAU;
+            }
+            let position = position_at_angle(&stamp, angle);
+            let expected = sector as f64 * stamp.perimeter / 8.0;
+            let delta = (position - expected)
+                .abs()
+                .min(stamp.perimeter - (position - expected).abs());
+            assert!(
+                delta < 1.5,
+                "sector {sector} arc error {delta} (position {position}, expected {expected})"
+            );
+        }
     }
 }
