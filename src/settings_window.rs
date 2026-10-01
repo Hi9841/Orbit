@@ -787,6 +787,36 @@ fn draw_footer_button(item: &DRAWITEMSTRUCT) {
                     let _ = FillRect(item.hDC, &item.rcItem, brushes.canvas);
                 }
             });
+            let line = CreateSolidBrush(COLOR_DIVIDER);
+            for edge in [
+                RECT {
+                    left: bounds.left,
+                    top: bounds.top,
+                    right: bounds.right,
+                    bottom: bounds.top + 1,
+                },
+                RECT {
+                    left: bounds.left,
+                    top: bounds.bottom - 1,
+                    right: bounds.right,
+                    bottom: bounds.bottom,
+                },
+                RECT {
+                    left: bounds.left,
+                    top: bounds.top,
+                    right: bounds.left + 1,
+                    bottom: bounds.bottom,
+                },
+                RECT {
+                    left: bounds.right - 1,
+                    top: bounds.top,
+                    right: bounds.right,
+                    bottom: bounds.bottom,
+                },
+            ] {
+                let _ = FillRect(item.hDC, &edge, line);
+            }
+            let _ = DeleteObject(HGDIOBJ(line.0));
         }
         let _ = SetBkMode(item.hDC, windows::Win32::Graphics::Gdi::TRANSPARENT);
         let _ = SetTextColor(item.hDC, ink);

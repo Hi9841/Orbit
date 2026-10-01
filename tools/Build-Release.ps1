@@ -104,6 +104,25 @@ directory = "vendor"
         '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name
     }
     [System.IO.File]::WriteAllLines((Join-Path $dist 'SHA256SUMS.txt'), $checksums)
+    $seedPath = Join-Path $env:USERPROFILE '.orbit\signing\seed'
+    if (Test-Path -LiteralPath $seedPath) {
+        $env:ORBIT_UPDATE_SIGNING_SEED = [System.IO.File]::ReadAllText($seedPath).Trim()
+        $unsigned = Join-Path $dist 'update-unsigned.json'
+        $signed = Join-Path $dist 'update.json'
+        $manifest = @{
+            version = $version
+            installer_url = "https://github.com/Hi9841/Orbit/releases/download/v$version/OrbitSetup-$version-x64.exe"
+            sha256 = $hash
+            notes = "Orbit $version"
+            signature = ''
+        } | ConvertTo-Json
+        [System.IO.File]::WriteAllText($unsigned, $manifest)
+        if (Test-Path -LiteralPath $signed) { Remove-Item -LiteralPath $signed }
+        & cargo run --locked --quiet --bin orbit-release -- sign $unsigned $signed
+        if ($LASTEXITCODE -ne 0) { throw 'Update manifest signing failed' }
+        Remove-Item -LiteralPath $unsigned
+        Remove-Item Env:ORBIT_UPDATE_SIGNING_SEED -ErrorAction SilentlyContinue
+    }
     "status: built`nversion: $version`ninstaller: $installer`nsha256: $hash"
 } finally {
     Pop-Location
