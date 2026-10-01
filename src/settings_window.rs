@@ -11,8 +11,8 @@ use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POI
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, ClientToScreen, CreateFontW, CreateRectRgn,
-    CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawFocusRect, DrawTextW, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD,
+    CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
+    DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD,
     FillRect, GetMonitorInfoW, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, OPAQUE, OUT_DEFAULT_PRECIS,
     SetBkColor, SetBkMode, SetTextColor, SetWindowRgn,
@@ -23,26 +23,26 @@ use windows::Win32::UI::Controls::Dialogs::{
     OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED, ODT_LISTBOX, SetScrollInfo, SetWindowTheme,
+    DRAWITEMSTRUCT, ODS_SELECTED, ODT_BUTTON, ODT_LISTBOX, SetScrollInfo, SetWindowTheme,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, GetKeyState, IsWindowEnabled, SetFocus,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CB_ADDSTRING,
-    CB_GETCURSEL, CB_GETITEMDATA, CB_SETCURSEL, CB_SETITEMDATA, CBS_DROPDOWNLIST,
-    CBS_NOINTEGRALHEIGHT, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    ES_AUTOVSCROLL, ES_MULTILINE, ES_NUMBER, ES_WANTRETURN, GetClassNameW, GetClientRect,
-    GetDlgItem, GetParent, GetWindowTextLengthW, GetWindowTextW, HWND_BOTTOM, HWND_TOP, IDC_ARROW,
-    IDI_APPLICATION, IsWindowVisible, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LB_SETITEMHEIGHT,
-    LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOTIFY, LBS_OWNERDRAWFIXED, LoadCursorW, LoadIconW, MSG,
-    RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
-    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_OWNERDRAW, CB_ADDSTRING, CB_GETCURSEL,
+    CB_GETITEMDATA, CB_SETCURSEL, CB_SETITEMDATA, CBS_DROPDOWNLIST, CBS_NOINTEGRALHEIGHT,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, ES_AUTOVSCROLL, ES_MULTILINE,
+    ES_NUMBER, ES_WANTRETURN, GetClassNameW, GetClientRect, GetDlgItem, GetParent,
+    GetWindowTextLengthW, GetWindowTextW, HWND_BOTTOM, HWND_TOP, IDC_ARROW, IDI_APPLICATION,
+    IsWindowVisible, LB_ADDSTRING, LB_GETCURSEL, LB_SETCURSEL, LB_SETITEMHEIGHT, LBN_SELCHANGE,
+    LBS_HASSTRINGS, LBS_NOTIFY, LBS_OWNERDRAWFIXED, LoadCursorW, LoadIconW, MSG, RegisterClassW,
+    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SendMessageW,
+    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_SETFONT, WM_SIZE, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GW_CHILD, GW_HWNDNEXT, GetScrollInfo, GetWindow, GetWindowRect, IsChild, SB_LINEDOWN,
@@ -68,15 +68,17 @@ const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
     COLORREF(red as u32 | ((green as u32) << 8) | ((blue as u32) << 16))
 }
 
-const COLOR_CANVAS: COLORREF = rgb(26, 28, 32);
-const COLOR_SIDEBAR: COLORREF = rgb(20, 22, 26);
-const COLOR_PANEL: COLORREF = rgb(33, 35, 39);
-const COLOR_INPUT: COLORREF = rgb(43, 45, 49);
-const COLOR_SELECTION: COLORREF = rgb(54, 57, 62);
-const COLOR_DIVIDER: COLORREF = rgb(56, 58, 62);
-const COLOR_TEXT: COLORREF = rgb(239, 238, 234);
-const COLOR_MUTED: COLORREF = rgb(169, 170, 173);
+const COLOR_CANVAS: COLORREF = rgb(12, 14, 18);
+const COLOR_SIDEBAR: COLORREF = rgb(17, 19, 24);
+const COLOR_PANEL: COLORREF = rgb(22, 24, 30);
+const COLOR_INPUT: COLORREF = rgb(30, 33, 40);
+const COLOR_SELECTION: COLORREF = rgb(40, 40, 44);
+const COLOR_DIVIDER: COLORREF = rgb(42, 46, 56);
+const COLOR_TEXT: COLORREF = rgb(244, 244, 242);
+const COLOR_MUTED: COLORREF = rgb(148, 154, 166);
 const COLOR_ERROR: COLORREF = rgb(248, 152, 148);
+const COLOR_ACCENT: COLORREF = rgb(236, 236, 240);
+const COLOR_ACCENT_INK: COLORREF = rgb(18, 18, 22);
 // windows-rs 0.62 does not define SS_NOPREFIX/BS_NOPREFIX; values from WinUser.h.
 const SS_NOPREFIX_RAW: u32 = 0x80;
 const BS_NOPREFIX_RAW: u32 = 0x8000;
@@ -191,14 +193,14 @@ const RADIAL_DIRECTIONS: [&str; ACTION_COUNT] = [
     "Top right",
 ];
 const PAGE_NAMES: [&str; 8] = [
-    "General & behavior",
-    "Radial menu",
+    "General",
+    "Radial",
     "Preview",
     "Shortcuts",
-    "Custom frames",
+    "Frames",
     "Exclusions",
     "Advanced",
-    "About & updates",
+    "About",
 ];
 
 #[derive(Clone)]
@@ -226,6 +228,7 @@ struct WindowBrushes {
     input: HBRUSH,
     selection: HBRUSH,
     divider: HBRUSH,
+    accent: HBRUSH,
 }
 
 thread_local! {
@@ -279,7 +282,7 @@ pub fn open() -> Result<(), String> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("OrbitSettings"),
-            w!("Orbit settings"),
+            w!("Settings"),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -296,7 +299,7 @@ pub fn open() -> Result<(), String> {
         error.to_string()
     })?;
     WINDOW.with(|slot| slot.set(Some(hwnd)));
-    fit_window_to_work_area(hwnd, 1020, 740);
+    fit_window_to_work_area(hwnd, 1120, 760);
     show_settings_window(hwnd);
     Ok(())
 }
@@ -402,7 +405,42 @@ unsafe extern "system" fn settings_proc(
                     std::mem::size_of_val(&dark_mode) as u32,
                 )
             };
+            let caption = COLORREF(0x0012_0E0C);
+            let caption_text = COLORREF(0x00F2_F4F4);
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    hwnd,
+                    windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(35),
+                    (&raw const caption).cast(),
+                    std::mem::size_of_val(&caption) as u32,
+                )
+            };
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    hwnd,
+                    windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(36),
+                    (&raw const caption_text).cast(),
+                    std::mem::size_of_val(&caption_text) as u32,
+                )
+            };
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    hwnd,
+                    windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(34),
+                    (&raw const caption).cast(),
+                    std::mem::size_of_val(&caption) as u32,
+                )
+            };
             let _ = unsafe { SetWindowTheme(hwnd, w!("DarkMode_Explorer"), PCWSTR::null()) };
+            let corner: u32 = 2;
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    hwnd,
+                    windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(33),
+                    (&raw const corner).cast(),
+                    std::mem::size_of_val(&corner) as u32,
+                )
+            };
             rebuild_fonts(hwnd);
             if let Err(error) = create_shell(hwnd) {
                 set_status(hwnd, &error);
@@ -440,6 +478,10 @@ unsafe extern "system" fn settings_proc(
                 let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
                 if item.CtlID == SIDEBAR as u32 && item.CtlType == ODT_LISTBOX {
                     draw_sidebar_item(item);
+                    return LRESULT(1);
+                }
+                if item.CtlType == ODT_BUTTON {
+                    draw_footer_button(item);
                     return LRESULT(1);
                 }
             }
@@ -487,27 +529,29 @@ unsafe extern "system" fn settings_proc(
                 SIDEBAR if code == LBN_SELCHANGE => switch_page(hwnd),
                 SHORTCUT_LIST if code == LBN_SELCHANGE => select_shortcut(hwnd),
                 FRAME_LIST if code == LBN_SELCHANGE => select_frame(hwnd),
-                SHORTCUT_NEW => new_shortcut(hwnd),
-                SHORTCUT_DELETE => delete_shortcut(hwnd),
-                SHORTCUT_ACTION_ADD => add_shortcut_action(hwnd),
-                SHORTCUT_ACTION_REMOVE => remove_shortcut_action(hwnd),
-                SHORTCUT_APPLY => apply_shortcut_editor(hwnd),
-                RADIAL_SYSTEM_ACCENT => update_radial_color_enabled(hwnd),
-                RADIAL_GRADIENT => update_gradient_enabled(hwnd),
-                ADV_EDGE_ENABLED => update_edge_padding_enabled(hwnd),
-                ADV_ANIMATE_WINDOWS | ADV_ANIMATE_STASHED => update_animation_enabled(hwnd),
-                ADV_MIDDLE_CLICK => update_middle_click_delay_enabled(hwnd),
-                FRAME_NEW => new_frame(hwnd),
-                FRAME_DELETE => delete_frame(hwnd),
-                FRAME_APPLY => apply_frame_editor(hwnd),
-                SAVE => save_settings(hwnd),
-                CANCEL => unsafe {
+                SHORTCUT_NEW if code == 0 => new_shortcut(hwnd),
+                SHORTCUT_DELETE if code == 0 => delete_shortcut(hwnd),
+                SHORTCUT_ACTION_ADD if code == 0 => add_shortcut_action(hwnd),
+                SHORTCUT_ACTION_REMOVE if code == 0 => remove_shortcut_action(hwnd),
+                SHORTCUT_APPLY if code == 0 => apply_shortcut_editor(hwnd),
+                RADIAL_SYSTEM_ACCENT if code == 0 => update_radial_color_enabled(hwnd),
+                RADIAL_GRADIENT if code == 0 => update_gradient_enabled(hwnd),
+                ADV_EDGE_ENABLED if code == 0 => update_edge_padding_enabled(hwnd),
+                ADV_ANIMATE_WINDOWS | ADV_ANIMATE_STASHED if code == 0 => {
+                    update_animation_enabled(hwnd)
+                }
+                ADV_MIDDLE_CLICK if code == 0 => update_middle_click_delay_enabled(hwnd),
+                FRAME_NEW if code == 0 => new_frame(hwnd),
+                FRAME_DELETE if code == 0 => delete_frame(hwnd),
+                FRAME_APPLY if code == 0 => apply_frame_editor(hwnd),
+                SAVE if code == 0 => save_settings(hwnd),
+                CANCEL if code == 0 => unsafe {
                     let _ = DestroyWindow(hwnd);
                 },
-                RESET => reset_editor(hwnd),
-                IMPORT => import_settings(hwnd),
-                EXPORT => export_settings(hwnd),
-                ABOUT_UPDATE => check_for_updates(hwnd),
+                RESET if code == 0 => reset_editor(hwnd),
+                IMPORT if code == 0 => import_settings(hwnd),
+                EXPORT if code == 0 => export_settings(hwnd),
+                ABOUT_UPDATE if code == 0 => check_for_updates(hwnd),
                 _ => {}
             }
             LRESULT(0)
@@ -553,6 +597,7 @@ fn create_brushes() {
                 input: unsafe { CreateSolidBrush(COLOR_INPUT) },
                 selection: unsafe { CreateSolidBrush(COLOR_SELECTION) },
                 divider: unsafe { CreateSolidBrush(COLOR_DIVIDER) },
+                accent: unsafe { CreateSolidBrush(COLOR_ACCENT) },
             }));
         }
     });
@@ -567,6 +612,7 @@ fn delete_brushes() {
             brushes.input,
             brushes.selection,
             brushes.divider,
+            brushes.accent,
         ] {
             unsafe {
                 let _ = DeleteObject(HGDIOBJ(brush.0));
@@ -583,7 +629,7 @@ fn paint_background(hwnd: HWND, hdc: HDC) {
     let dpi = dpi_for_window(hwnd);
     BRUSHES.with(|slot| {
         if let Some(brushes) = slot.get() {
-            let sidebar_width = px(214, dpi);
+            let sidebar_width = px(248, dpi);
             unsafe {
                 FillRect(hdc, &rect, brushes.canvas);
                 FillRect(
@@ -606,8 +652,8 @@ fn paint_background(hwnd: HWND, hdc: HDC) {
                 FillRect(
                     hdc,
                     &RECT {
-                        top: rect.bottom - px(68, dpi),
-                        bottom: rect.bottom - px(67, dpi),
+                        top: rect.bottom - px(84, dpi),
+                        bottom: rect.bottom - px(83, dpi),
                         ..rect
                     },
                     brushes.divider,
@@ -681,10 +727,10 @@ fn draw_sidebar_item(item: &DRAWITEMSTRUCT) {
             FillRect(item.hDC, &item.rcItem, brushes.sidebar);
             if selected {
                 let selection = RECT {
-                    left: item.rcItem.left + 4,
-                    top: item.rcItem.top + 2,
-                    right: item.rcItem.right - 4,
-                    bottom: item.rcItem.bottom - 2,
+                    left: item.rcItem.left + 8,
+                    top: item.rcItem.top + 6,
+                    right: item.rcItem.right - 8,
+                    bottom: item.rcItem.bottom - 6,
                 };
                 FillRect(item.hDC, &selection, brushes.selection);
             }
@@ -693,8 +739,8 @@ fn draw_sidebar_item(item: &DRAWITEMSTRUCT) {
             let mut label = to_wide(title);
             let label_len = label.len() - 1;
             let mut label_rect = RECT {
-                left: item.rcItem.left + 16,
-                right: item.rcItem.right - 10,
+                left: item.rcItem.left + 22,
+                right: item.rcItem.right - 12,
                 ..item.rcItem
             };
             DrawTextW(
@@ -703,25 +749,55 @@ fn draw_sidebar_item(item: &DRAWITEMSTRUCT) {
                 &mut label_rect,
                 DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
             );
-            if item.itemState.0 & ODS_FOCUS.0 != 0 {
-                // Inset to the selection rect so the dotted ring does not clash
-                // with the full-bleed item bounds (selection already signals focus).
-                let focus = RECT {
-                    left: item.rcItem.left + 4,
-                    top: item.rcItem.top + 2,
-                    right: item.rcItem.right - 4,
-                    bottom: item.rcItem.bottom - 2,
-                };
-                let _ = DrawFocusRect(item.hDC, &focus);
-            }
         }
     });
 }
 
+fn draw_footer_button(item: &DRAWITEMSTRUCT) {
+    let save = item.CtlID == SAVE as u32;
+    let pressed = item.itemState.0 & ODS_SELECTED.0 != 0;
+    let ink = if save {
+        COLOR_ACCENT_INK
+    } else if pressed {
+        COLOR_TEXT
+    } else {
+        COLOR_MUTED
+    };
+    unsafe {
+        if save {
+            let brush = CreateSolidBrush(if pressed { COLOR_TEXT } else { COLOR_ACCENT });
+            let _ = FillRect(item.hDC, &item.rcItem, brush);
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+        } else {
+            BRUSHES.with(|slot| {
+                if let Some(brushes) = slot.get() {
+                    let _ = FillRect(item.hDC, &item.rcItem, brushes.canvas);
+                }
+            });
+        }
+        let _ = SetBkMode(item.hDC, windows::Win32::Graphics::Gdi::TRANSPARENT);
+        let _ = SetTextColor(item.hDC, ink);
+        let mut text = [0u16; 64];
+        let len = GetWindowTextW(item.hwndItem, &mut text);
+        if len > 0 {
+            let mut label_rect = item.rcItem;
+            if pressed {
+                label_rect.top += 1;
+            }
+            DrawTextW(
+                item.hDC,
+                &mut text[..len as usize],
+                &mut label_rect,
+                DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+            );
+        }
+    }
+}
+
 fn rebuild_fonts(hwnd: HWND) {
     let dpi = dpi_for_window(hwnd);
-    let body_height = -((10_i64 * i64::from(dpi) + 36) / 72) as i32;
-    let title_height = -((15_i64 * i64::from(dpi) + 36) / 72) as i32;
+    let body_height = -((11_i64 * i64::from(dpi) + 36) / 72) as i32;
+    let title_height = -((20_i64 * i64::from(dpi) + 36) / 72) as i32;
     let body = unsafe {
         CreateFontW(
             body_height,
@@ -931,8 +1007,8 @@ fn set_scroll_offset(hwnd: HWND, requested: i32) {
 }
 
 fn create_shell(hwnd: HWND) -> Result<(), String> {
-    create_text(hwnd, BRAND, "ORBIT")?;
-    create_text(hwnd, SIDEBAR_LABEL, "SETTINGS")?;
+    create_text(hwnd, BRAND, "Orbit")?;
+    create_text(hwnd, SIDEBAR_LABEL, "")?;
     child(
         hwnd,
         w!("LISTBOX"),
@@ -955,41 +1031,22 @@ fn create_shell(hwnd: HWND) -> Result<(), String> {
         PAGE_DESCRIPTION,
     )?;
     child(hwnd, w!("STATIC"), w!(""), WINDOW_STYLE(0), STATUS)?;
-    child(
-        hwnd,
-        w!("BUTTON"),
-        w!("Save"),
-        WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32 | BS_NOPREFIX_RAW),
-        SAVE,
-    )?;
-    child(
-        hwnd,
-        w!("BUTTON"),
-        w!("Cancel"),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
-        CANCEL,
-    )?;
-    child(
-        hwnd,
-        w!("BUTTON"),
-        w!("Reset defaults"),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
-        RESET,
-    )?;
-    child(
-        hwnd,
-        w!("BUTTON"),
-        w!("Import…"),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
-        IMPORT,
-    )?;
-    child(
-        hwnd,
-        w!("BUTTON"),
-        w!("Export…"),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
-        EXPORT,
-    )?;
+    for (id, label) in [
+        (SAVE, "Save"),
+        (CANCEL, "Cancel"),
+        (RESET, "Reset"),
+        (IMPORT, "Import"),
+        (EXPORT, "Export"),
+    ] {
+        let wide = to_wide(label);
+        child(
+            hwnd,
+            w!("BUTTON"),
+            PCWSTR(wide.as_ptr()),
+            WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32 | BS_NOPREFIX_RAW),
+            id,
+        )?;
+    }
     Ok(())
 }
 
@@ -1008,7 +1065,7 @@ fn fill_sidebar(hwnd: HWND) {
 
 fn set_sidebar_item_height(hwnd: HWND) {
     if let Ok(sidebar) = unsafe { GetDlgItem(Some(hwnd), SIDEBAR) } {
-        let height = px(32, dpi_for_window(hwnd));
+        let height = px(48, dpi_for_window(hwnd));
         unsafe {
             SendMessageW(
                 sidebar,
@@ -1048,7 +1105,17 @@ fn child(
     }
     .map_err(|error| error.to_string())?;
     unsafe {
-        let _ = SetWindowTheme(control, w!("DarkMode_Explorer"), PCWSTR::null());
+        let mut class_name = [0u16; 32];
+        let class_len = GetClassNameW(control, &mut class_name);
+        let class_name = String::from_utf16_lossy(&class_name[..class_len as usize]);
+        let theme = if class_name.eq_ignore_ascii_case("Edit")
+            || class_name.eq_ignore_ascii_case("ComboBox")
+        {
+            w!("DarkMode_CFD")
+        } else {
+            w!("DarkMode_Explorer")
+        };
+        let _ = SetWindowTheme(control, theme, PCWSTR::null());
         let fonts = FONTS.with(Cell::get);
         let font = if id == PAGE_TITLE || id == BRAND {
             fonts.map_or(HFONT::default(), |fonts| fonts.title)
@@ -1084,7 +1151,7 @@ fn create_button(parent: HWND, id: i32, text: &str) -> Result<HWND, String> {
         parent,
         w!("BUTTON"),
         PCWSTR(wide.as_ptr()),
-        WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32 | BS_NOPREFIX_RAW),
+        WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32 | BS_NOPREFIX_RAW),
         id,
     )
 }
@@ -1110,7 +1177,7 @@ fn create_numeric(parent: HWND, id: i32, title: &str, value: i64) -> Result<(), 
         parent,
         w!("EDIT"),
         PCWSTR(wide.as_ptr()),
-        WS_BORDER | WS_TABSTOP | WINDOW_STYLE(ES_NUMBER as u32),
+        WS_TABSTOP | WINDOW_STYLE(ES_NUMBER as u32),
         id,
     )?;
     create_text(parent, field_error_id(id), "")?;
@@ -1120,20 +1187,14 @@ fn create_numeric(parent: HWND, id: i32, title: &str, value: i64) -> Result<(), 
 fn create_decimal(parent: HWND, id: i32, title: &str, value: f64) -> Result<(), String> {
     create_text(parent, id + 1000, title)?;
     let wide = to_wide(&format_float(value));
-    child(
-        parent,
-        w!("EDIT"),
-        PCWSTR(wide.as_ptr()),
-        WS_BORDER | WS_TABSTOP,
-        id,
-    )?;
+    child(parent, w!("EDIT"), PCWSTR(wide.as_ptr()), WS_TABSTOP, id)?;
     create_text(parent, field_error_id(id), "")?;
     Ok(())
 }
 
 fn create_edit(parent: HWND, id: i32, text: &str, multiline: bool) -> Result<(), String> {
     let wide = to_wide(text);
-    let mut style = WS_BORDER | WS_TABSTOP;
+    let mut style = WS_TABSTOP;
     if multiline {
         style |= WS_VSCROLL
             | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32);
@@ -1161,7 +1222,7 @@ fn create_list(parent: HWND, id: i32) -> Result<HWND, String> {
         parent,
         w!("LISTBOX"),
         w!(""),
-        WS_BORDER | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(LBS_NOTIFY as u32),
+        WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(LBS_NOTIFY as u32),
         id,
     )
 }
@@ -1425,37 +1486,37 @@ fn build_preview(hwnd: HWND, settings: &Settings) -> Result<(), String> {
     create_checkbox(
         hwnd,
         PREVIEW_VISIBLE,
-        "Show the preview while choosing a layout",
+        "Show where the window will land",
         settings.preview_visible,
     )?;
     create_numeric(
         hwnd,
         PREVIEW_OPACITY,
-        "Preview opacity (0-255)",
+        "Opacity",
         i64::from(settings.preview_opacity),
     )?;
     create_numeric(
         hwnd,
         PREVIEW_PADDING,
-        "Preview inset (px)",
+        "Inset",
         i64::from(settings.preview_padding),
     )?;
     create_numeric(
         hwnd,
         PREVIEW_CORNER,
-        "Fallback corner radius (96-DPI px)",
+        "Corner radius",
         i64::from(settings.preview_corner_radius),
     )?;
     create_numeric(
         hwnd,
         PREVIEW_BORDER,
-        "Border thickness (96-DPI px)",
+        "Border",
         i64::from(settings.preview_border_thickness),
     )?;
     create_checkbox(
         hwnd,
         PREVIEW_WINDOW_CORNERS,
-        "Use the standard Windows corner radius",
+        "Match Windows corners",
         settings.preview_use_window_corner_radius,
     )?;
     create_text(
@@ -2384,27 +2445,27 @@ fn build_about(hwnd: HWND) -> Result<(), String> {
 
 fn layout_window(hwnd: HWND) {
     let (width, height) = client_size_logical(hwnd);
-    move_control(hwnd, BRAND, 22, 21, 178, 25);
-    move_control(hwnd, SIDEBAR_LABEL, 22, 62, 178, 18);
-    move_control(hwnd, SIDEBAR, 14, 88, 192, (height - 174).max(120));
+    move_control(hwnd, BRAND, 28, 28, 190, 36);
+    move_control(hwnd, SIDEBAR_LABEL, 0, -40, 1, 1);
+    move_control(hwnd, SIDEBAR, 12, 84, 224, (height - 168).max(160));
     raise_shell(hwnd);
-    move_control(hwnd, PAGE_TITLE, 232, 18, width - 256, 34);
-    move_control(hwnd, PAGE_DESCRIPTION, 232, 54, width - 256, 42);
-    move_control(hwnd, STATUS, 232, height - 91, width - 256, 24);
-    move_control(hwnd, SAVE, width - 106, height - 54, 88, 30);
-    move_control(hwnd, CANCEL, width - 202, height - 54, 88, 30);
-    move_control(hwnd, EXPORT, width - 298, height - 54, 88, 30);
-    move_control(hwnd, IMPORT, width - 394, height - 54, 88, 30);
-    move_control(hwnd, RESET, 20, height - 54, 166, 30);
+    move_control(hwnd, PAGE_TITLE, 284, 28, width - 328, 40);
+    move_control(hwnd, PAGE_DESCRIPTION, 284, -40, 1, 1);
+    move_control(hwnd, STATUS, 284, height - 92, (width - 620).max(80), 22);
+    move_control(hwnd, SAVE, width - 140, height - 60, 108, 36);
+    move_control(hwnd, CANCEL, width - 256, height - 60, 104, 36);
+    move_control(hwnd, EXPORT, width - 372, height - 60, 104, 36);
+    move_control(hwnd, IMPORT, width - 488, height - 60, 104, 36);
+    move_control(hwnd, RESET, 20, height - 60, 108, 36);
 }
 
 fn layout_page(hwnd: HWND, page: usize) {
     let (width, height) = client_size_logical(hwnd);
     update_scrollbar(hwnd, page, height);
-    let x = 232;
-    let body_y = 108;
-    let body_width = (width - 256).max(360);
-    let gap = 20;
+    let x = 284;
+    let body_y = 112;
+    let body_width = (width - 320).max(360);
+    let gap = 32;
     match page {
         0 => {
             let column = (body_width - gap) / 2;
@@ -2436,7 +2497,7 @@ fn layout_page(hwnd: HWND, page: usize) {
                 (BEHAVIOR_DISABLE_CURSOR, 6),
                 (BEHAVIOR_LOCK_CENTER, 7),
             ] {
-                move_control(hwnd, id, x + 16, body_y + 232 + n * 30, column - 32, 26);
+                move_control(hwnd, id, x + 20, body_y + 248 + n * 38, column - 40, 32);
             }
 
             let rx = x + column + gap + 16;
@@ -2911,14 +2972,14 @@ fn layout_numeric(hwnd: HWND, id: i32, x: i32, y: i32, width: i32) {
 fn update_caption(hwnd: HWND, page: usize) {
     let version = env!("CARGO_PKG_VERSION");
     let descriptions = [
-        "Set how Orbit places windows, starts, and responds to the trigger.",
-        "Choose the ring shape, accent, and action assigned to each direction.",
-        "Tune the live window preview shown while selecting a layout.",
-        "Create keyboard shortcuts that cycle through window actions.",
-        "Define reusable layouts using fractions of each monitor work area.",
-        "Keep selected applications out of Orbit window management.",
-        "Fine-tune edge padding, animations, trigger input, and cycling.",
-        "Orbit version and update controls.",
+        "Placement, startup, and the trigger.",
+        "Ring shape, accent, and the action for each direction.",
+        "The plate that shows where the window will land.",
+        "Shortcuts that cycle through actions.",
+        "Layouts as fractions of the monitor.",
+        "Applications Orbit should ignore.",
+        "Padding, motion, and trigger details.",
+        "Version and updates.",
     ];
     if let Some(title) = PAGE_NAMES.get(page) {
         set_control_text(hwnd, PAGE_TITLE, title);
@@ -2930,11 +2991,8 @@ fn update_caption(hwnd: HWND, page: usize) {
             &format!("Orbit version {version} and update controls."),
         );
     } else if let Some(description) = descriptions.get(page) {
-        set_control_text(
-            hwnd,
-            PAGE_DESCRIPTION,
-            &format!("{description}  Scroll with the wheel or Ctrl+Page Up/Down."),
-        );
+        let _ = description;
+        set_control_text(hwnd, PAGE_DESCRIPTION, "");
     }
 }
 

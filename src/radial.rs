@@ -2,6 +2,10 @@ use orbit::geometry::Action;
 use orbit::settings::Settings;
 
 const CANVAS_GUTTER_PT: u32 = 80;
+/// Neutral glass, matched to Prism's dark shell. Equal channels, no blue cast.
+const RING_BODY: u32 = 0x2A2A2E;
+const RING_EDGE: u32 = 0xF4F4F6;
+const RING_CAP: u32 = 0xFFFFFF;
 
 #[derive(Clone, Debug)]
 pub struct RadialBitmap {
@@ -155,7 +159,7 @@ fn render(
             // A restrained light edge separates the dark HUD ring from its background.
             let edge_depth = (-outer_distance).min(inner_distance);
             let edge_strength = (1.0 - edge_depth / (1.5 * scale)).clamp(0.0, 1.0);
-            let mut color = interpolate_rgb(0x354758, 0x718496, edge_strength * 0.7);
+            let mut color = interpolate_rgb(RING_BODY, RING_EDGE, edge_strength * 0.92);
             let alpha = ring_coverage * 255.0;
             if ring_coverage > 0.0 && !selected_positions.is_empty() {
                 let position = rounded_square_path_position(
@@ -185,15 +189,13 @@ fn render(
                 let cap_color = if settings.use_gradient {
                     interpolate_rgb(accent, gradient, cap_fade)
                 } else {
-                    channels(accent)
+                    channels(RING_CAP)
                 };
                 for (value, cap_value) in color.iter_mut().zip(cap_color) {
                     *value += (cap_value - *value) * cap_coverage;
                 }
-                // Loop layers the ring border over the cap. This keeps a light cap
-                // defined against a pale window without making the whole ring bright.
-                for (value, rim_value) in color.iter_mut().zip(channels(0x777b7d)) {
-                    *value += (rim_value - *value) * edge_strength * cap_coverage * 0.7;
+                for (value, rim_value) in color.iter_mut().zip(channels(RING_EDGE)) {
+                    *value += (rim_value - *value) * edge_strength * cap_coverage * 0.35;
                 }
             }
 
@@ -391,7 +393,7 @@ pub fn build_stamp(settings: &Settings, dpi: u32) -> Result<RadialStamp, String>
             let ring_coverage = ((-outer_distance).min(inner_distance) + 0.5).clamp(0.0, 1.0);
             let edge_depth = (-outer_distance).min(inner_distance);
             let edge_strength = (1.0 - edge_depth / (1.5 * metrics.scale)).clamp(0.0, 1.0);
-            let color = interpolate_rgb(0x354758, 0x718496, edge_strength * 0.7);
+            let color = interpolate_rgb(RING_BODY, RING_EDGE, edge_strength * 0.92);
             let alpha = ring_coverage * 255.0;
             let index = (y * metrics.size + x) as usize;
             idle[index] = premultiplied_bgra(color, alpha);
@@ -491,7 +493,7 @@ pub fn paint_stamp(stamp: &RadialStamp, angle: Option<f64>) -> Vec<u32> {
         let cap_color = if stamp.use_gradient {
             interpolate_rgb(stamp.accent, stamp.gradient, cap_fade)
         } else {
-            channels(stamp.accent)
+            channels(RING_CAP)
         };
         let mut color = [
             f64::from(sample.color[0]),
@@ -501,8 +503,8 @@ pub fn paint_stamp(stamp: &RadialStamp, angle: Option<f64>) -> Vec<u32> {
         for (value, cap_value) in color.iter_mut().zip(cap_color) {
             *value += (cap_value - *value) * coverage;
         }
-        for (value, rim_value) in color.iter_mut().zip(channels(0x777b7d)) {
-            *value += (rim_value - *value) * f64::from(sample.edge_strength) * coverage * 0.7;
+        for (value, rim_value) in color.iter_mut().zip(channels(RING_EDGE)) {
+            *value += (rim_value - *value) * f64::from(sample.edge_strength) * coverage * 0.35;
         }
         pixels[sample.index as usize] = premultiplied_bgra(color, f64::from(sample.alpha));
     }
@@ -574,12 +576,16 @@ mod tests {
     }
 
     #[test]
-    fn pale_cap_retains_a_visible_outer_edge_on_a_light_window() {
+    fn glass_cap_is_white_and_the_outside_stays_clear() {
         let bitmap = render_bitmap_for_sector(&Settings::default(), Some(0), 96).unwrap();
         let cap_middle = (at(&bitmap, 130, 90) >> 16) & 0xff;
-        let cap_edge = (at(&bitmap, 139, 90) >> 16) & 0xff;
-        assert!(cap_middle > 220);
-        assert!(cap_edge < cap_middle - 25);
+        assert!(cap_middle > 230, "the aimed arc is white glass");
+        assert!(at(&bitmap, 139, 90) >> 24 > 80, "the rim is still drawn");
+        assert_eq!(
+            at(&bitmap, 150, 90) >> 24,
+            0,
+            "outside the ring stays clear"
+        );
     }
 
     #[test]
@@ -625,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn system_accent_tints_the_direction_cap() {
+    fn direction_cap_stays_neutral_glass_instead_of_a_blue_accent() {
         let settings = Settings {
             use_system_accent: true,
             accent_color: 0x000000,
@@ -636,8 +642,17 @@ mod tests {
             render_bitmap_with_colors(&settings, Some(Action::RightHalf), 96, Some(0xff0000))
                 .unwrap();
         let cap = at(&bitmap, 130, 90);
-        assert_eq!(cap & 0x00ff_0000, 0x00ff_0000);
-        assert!(cap >> 24 > 100);
+        let red = (cap >> 16) & 0xff;
+        let green = (cap >> 8) & 0xff;
+        let blue = cap & 0xff;
+        assert!(
+            red > 220 && green > 220 && blue > 220,
+            "cap {cap:#x} should be white glass"
+        );
+        assert!(
+            (red as i32 - blue as i32).abs() < 18,
+            "cap must not pick up the accent hue"
+        );
     }
 
     #[test]

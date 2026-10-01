@@ -4,6 +4,7 @@ mod configuration;
 mod history;
 mod login;
 mod platform;
+#[cfg(test)]
 mod preview;
 mod radial;
 mod settings_window;

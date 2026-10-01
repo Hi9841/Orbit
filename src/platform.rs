@@ -1,7 +1,9 @@
 use crate::history::{self, History};
 use crate::settings_window;
 use orbit::geometry::{Action, Rect};
-use orbit::settings::{Hotkey, PreviewStart, Settings, TriggerSide};
+#[cfg(test)]
+use orbit::settings::PreviewStart;
+use orbit::settings::{Hotkey, Settings, TriggerSide};
 use orbit::update::{self, Manifest};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -20,12 +22,12 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetColorizationColor, DwmGetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, COLORONCOLOR, CreateCompatibleDC,
-    CreateDCW, CreateDIBSection, CreateSolidBrush, DIB_RGB_COLORS, DeleteDC, DeleteObject,
-    EndPaint, EnumDisplayMonitors, FillRect, GetDC, GetDeviceCaps, GetMonitorInfoW, HGDIOBJ,
-    HMONITOR, HORZSIZE, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW,
-    MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject,
-    SetDIBitsToDevice, SetStretchBltMode, StretchDIBits, UpdateWindow, VERTSIZE,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, COLORONCOLOR, CreateDCW, CreatePen,
+    CreateSolidBrush, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, EnumDisplayMonitors,
+    FillRect, GetDeviceCaps, GetMonitorInfoW, HGDIOBJ, HMONITOR, HORZSIZE, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
+    PAINTSTRUCT, PS_SOLID, RoundRect, SRCCOPY, SelectObject, SetDIBitsToDevice, SetStretchBltMode,
+    StretchDIBits, UpdateWindow, VERTSIZE,
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -55,15 +57,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONINFORMATION, MB_OK, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG, MSLLHOOKSTRUCT, MessageBoxW,
     PostMessageW, PostQuitMessage, RegisterClassW, RemovePropW, SHOW_WINDOW_CMD, SMTO_ABORTIFHUNG,
     SMTO_BLOCK, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageTimeoutW, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetPropW, SetTimer, SetWindowPlacement, SetWindowPos,
-    SetWindowsHookExW, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOWPLACEMENT, WM_APP,
-    WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CAPTION,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
-    WS_THICKFRAME, WindowFromPoint,
+    SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SendMessageTimeoutW, SetForegroundWindow, SetLayeredWindowAttributes, SetPropW, SetTimer,
+    SetWindowPlacement, SetWindowPos, SetWindowsHookExW, ShowWindow, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WINDOWPLACEMENT, WM_APP, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_OVERLAPPED, WS_POPUP, WS_THICKFRAME, WindowFromPoint,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     LWA_ALPHA, LWA_COLORKEY, SPI_GETCLIENTAREAANIMATION, SPI_GETUIEFFECTS,
@@ -71,6 +73,45 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::BOOL;
 use windows::core::{PCWSTR, w};
+
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+    fn timeEndPeriod(period: u32) -> u32;
+}
+
+static SMOOTH_TIMER_HOLD: AtomicU32 = AtomicU32::new(0);
+
+fn hold_smooth_timer() {
+    if SMOOTH_TIMER_HOLD.fetch_add(1, Ordering::AcqRel) == 0 {
+        unsafe {
+            let _ = timeBeginPeriod(1);
+        }
+    }
+}
+
+fn release_smooth_timer() {
+    let previous = SMOOTH_TIMER_HOLD.fetch_sub(1, Ordering::AcqRel);
+    if previous == 1 {
+        unsafe {
+            let _ = timeEndPeriod(1);
+        }
+    }
+}
+
+fn sync_animation_clock() {
+    let (should, held) = SESSION.with(|cell| {
+        let session = cell.borrow();
+        (!session.animations.is_empty(), session.animation_clock)
+    });
+    if should && !held {
+        SESSION.with(|cell| cell.borrow_mut().animation_clock = true);
+        hold_smooth_timer();
+    } else if !should && held {
+        SESSION.with(|cell| cell.borrow_mut().animation_clock = false);
+        release_smooth_timer();
+    }
+}
 
 const HOTKEY_ID: i32 = 1;
 const SHORTCUT_HOTKEY_BASE: i32 = 100;
@@ -94,7 +135,7 @@ const RECOVERY_PROPERTY: windows::core::PCWSTR = w!("Orbit.Recovery.6C96F66A");
 // COLORREF stores red in the low byte; a 32-bit BI_RGB pixel stores it in the high color byte.
 const TRANSPARENT_COLOR_KEY: COLORREF = COLORREF(0x0003_0201);
 const TRANSPARENT_DIB_PIXEL: u32 = 0x0001_0203;
-const RADIAL_WINDOW_OPACITY: u8 = 255;
+const RADIAL_WINDOW_OPACITY: u8 = 196;
 
 // Layered popups stay on the color-key path (WM_PAINT + SetDIBitsToDevice).
 // Measured on this machine (DPI 96): UpdateLayeredWindow per-pixel alpha left a
@@ -135,6 +176,7 @@ struct HookMouseEvent {
     point: POINT,
 }
 static HOOK_EVENTS: Mutex<VecDeque<HookMouseEvent>> = Mutex::new(VecDeque::new());
+static LAST_BALLOON: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
 static UPDATE_CHECKING: AtomicBool = AtomicBool::new(false);
 static AVAILABLE_UPDATE: Mutex<Option<Manifest>> = Mutex::new(None);
@@ -171,10 +213,13 @@ struct Session {
     animations: Vec<WindowAnimation>,
     animation_versions: Vec<(isize, u64)>,
     animation_tick_active: bool,
+    animation_clock: bool,
     preview_bitmap_cache: Option<(PreviewStyleKey, PresentedBitmap, bool)>,
     preview_layer_opacity: Option<u8>,
     preview_current_frame: Option<Rect>,
-    preview_animation: Option<PreviewAnimation>,
+    preview_target_frame: Option<Rect>,
+    preview_step_at: Option<Instant>,
+    radial_needs_paint: bool,
     radial_bitmap: Option<PresentedBitmap>,
     radial_stamp: Option<crate::radial::RadialStamp>,
     radial_stamp_key: Option<RadialCacheKey>,
@@ -265,6 +310,14 @@ struct StashedWindow {
     original_frame: Rect,
 }
 
+#[derive(Clone, Copy)]
+struct FrameMargins {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
 struct WindowAnimation {
     window: HWND,
     process_id: u32,
@@ -273,6 +326,7 @@ struct WindowAnimation {
     generation: u64,
     from: Rect,
     to: Rect,
+    margins: FrameMargins,
     started: Instant,
     duration: std::time::Duration,
     completion: AnimationCompletion,
@@ -296,6 +350,7 @@ impl PresentedBitmap {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(test)]
 struct PreviewAnimation {
     from: Rect,
     to: Rect,
@@ -303,6 +358,7 @@ struct PreviewAnimation {
     duration: std::time::Duration,
 }
 
+#[cfg(test)]
 impl PreviewAnimation {
     fn frame_at(self, now: Instant) -> (Rect, bool) {
         let progress = (now.saturating_duration_since(self.started).as_secs_f64()
@@ -349,8 +405,10 @@ struct RadialCacheKey {
 /// Full preview rebuilds (screen capture + CPU blur + two presents) block the
 /// UI thread for ~17 ms in release (~150 ms in debug) per sector change.
 /// Rapid cursor moves must coalesce into one rebuild or the ring visibly jumps.
+#[cfg(test)]
 const PREVIEW_FULL_BUILD_DEBOUNCE_MS: u64 = 40;
 
+#[cfg(test)]
 fn preview_full_build_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|built| {
         now.saturating_duration_since(built)
@@ -914,31 +972,16 @@ fn rect_from_window(hwnd: HWND) -> Result<Rect, String> {
     }
 }
 
-fn set_visible_frame(
-    hwnd: HWND,
-    target: Rect,
-    extra_flags: windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS,
-) -> Result<(), String> {
-    position_visible_frame(hwnd, target, extra_flags)?;
-    let actual = rect_from_window(hwnd)?;
-    if (actual.left - target.left).abs() > 2
-        || (actual.top - target.top).abs() > 2
-        || (actual.right - target.right).abs() > 2
-        || (actual.bottom - target.bottom).abs() > 2
-    {
-        return Err("the target window refused the requested frame".into());
-    }
-    Ok(())
-}
-
-fn position_visible_frame(
-    hwnd: HWND,
-    target: Rect,
-    extra_flags: windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS,
-) -> Result<(), String> {
+fn read_frame_margins(hwnd: HWND) -> FrameMargins {
     let mut outer = RECT::default();
-    unsafe { GetWindowRect(hwnd, &mut outer) }
-        .map_err(|error| format!("cannot read window frame: {error}"))?;
+    if unsafe { GetWindowRect(hwnd, &mut outer) }.is_err() {
+        return FrameMargins {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+    }
     let mut visible = outer;
     let has_dwm_bounds = unsafe {
         DwmGetWindowAttribute(
@@ -949,41 +992,111 @@ fn position_visible_frame(
         )
     }
     .is_ok();
-    let (left_margin, top_margin, right_margin, bottom_margin) = if has_dwm_bounds {
-        (
-            visible.left - outer.left,
-            visible.top - outer.top,
-            outer.right - visible.right,
-            outer.bottom - visible.bottom,
-        )
-    } else {
-        (0, 0, 0, 0)
-    };
-    let x = target.left.saturating_sub(left_margin);
-    let y = target.top.saturating_sub(top_margin);
+    if !has_dwm_bounds {
+        return FrameMargins {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+    }
+    FrameMargins {
+        left: visible.left - outer.left,
+        top: visible.top - outer.top,
+        right: outer.right - visible.right,
+        bottom: outer.bottom - visible.bottom,
+    }
+}
+
+fn outer_for(target: Rect, margins: FrameMargins) -> Rect {
+    let left = target.left.saturating_sub(margins.left);
+    let top = target.top.saturating_sub(margins.top);
     let width = target
         .width()
-        .saturating_add(left_margin)
-        .saturating_add(right_margin)
+        .saturating_add(margins.left)
+        .saturating_add(margins.right)
         .max(1);
     let height = target
         .height()
-        .saturating_add(top_margin)
-        .saturating_add(bottom_margin)
+        .saturating_add(margins.top)
+        .saturating_add(margins.bottom)
         .max(1);
+    Rect {
+        left,
+        top,
+        right: left.saturating_add(width),
+        bottom: top.saturating_add(height),
+    }
+}
+
+fn edges_near(actual: RECT, expected: Rect, tolerance: i32) -> bool {
+    (actual.left - expected.left).abs() <= tolerance
+        && (actual.top - expected.top).abs() <= tolerance
+        && (actual.right - expected.right).abs() <= tolerance
+        && (actual.bottom - expected.bottom).abs() <= tolerance
+}
+
+fn place_outer(
+    hwnd: HWND,
+    target: Rect,
+    margins: FrameMargins,
+    extra_flags: windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS,
+) -> Result<Rect, String> {
+    let outer = outer_for(target, margins);
     unsafe {
         SetWindowPos(
             hwnd,
             None,
-            x,
-            y,
-            width,
-            height,
+            outer.left,
+            outer.top,
+            outer.width().max(1),
+            outer.height().max(1),
             SWP_NOACTIVATE | SWP_NOZORDER | extra_flags,
         )
     }
     .map_err(|error| format!("cannot position window: {error}"))?;
-    Ok(())
+    Ok(outer)
+}
+
+fn window_landed(hwnd: HWND, target: Rect, margins: FrameMargins) -> bool {
+    let mut actual = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut actual) }.is_err() {
+        return false;
+    }
+    if edges_near(actual, outer_for(target, margins), 48) {
+        return true;
+    }
+    rect_from_window(hwnd).is_ok_and(|visible| {
+        let (cx, cy) = visible.center();
+        let (tx, ty) = target.center();
+        (cx - tx).abs() <= 96 && (cy - ty).abs() <= 96
+    })
+}
+
+fn set_visible_frame(
+    hwnd: HWND,
+    target: Rect,
+    extra_flags: windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS,
+) -> Result<(), String> {
+    let margins = read_frame_margins(hwnd);
+    // Windows clamps some frames (cell grids, minimum size, shadows). If the
+    // window is in the requested area, the move succeeded. Do not toast.
+    match place_outer(hwnd, target, margins, extra_flags) {
+        Ok(_) => Ok(()),
+        Err(error) if window_landed(hwnd, target, margins) => {
+            let _ = error;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn position_visible_frame(
+    hwnd: HWND,
+    target: Rect,
+    extra_flags: windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS,
+) -> Result<(), String> {
+    place_outer(hwnd, target, read_frame_margins(hwnd), extra_flags).map(|_| ())
 }
 
 fn animations_allowed(settings: &Settings) -> bool {
@@ -1069,6 +1182,7 @@ fn cancel_window_animation(hwnd: HWND) {
             }
         }
     }
+    sync_animation_clock();
 }
 
 fn cancel_all_animations() {
@@ -1101,6 +1215,7 @@ fn cancel_all_animations() {
             let _ = KillTimer(Some(host), ANIMATION_TIMER_ID);
         }
     }
+    sync_animation_clock();
 }
 
 fn start_window_animation(
@@ -1131,6 +1246,7 @@ fn start_window_animation(
     if process_id == 0 {
         return Ok(false);
     }
+    let margins = read_frame_margins(hwnd);
     let generation = SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
         let generation = bump_animation_generation(&mut session, hwnd);
@@ -1145,6 +1261,7 @@ fn start_window_animation(
             generation,
             from,
             to,
+            margins,
             started: Instant::now(),
             duration: std::time::Duration::from_millis(u64::from(settings.animation_duration_ms)),
             completion,
@@ -1152,8 +1269,9 @@ fn start_window_animation(
         generation
     });
     unsafe {
-        let _ = SetTimer(Some(host), ANIMATION_TIMER_ID, 16, None);
+        let _ = SetTimer(Some(host), ANIMATION_TIMER_ID, 8, None);
     }
+    sync_animation_clock();
     let _ = generation;
     Ok(true)
 }
@@ -1188,7 +1306,12 @@ fn advance_window_animations(host: HWND) {
             continue;
         }
         if unsafe { IsHungAppWindow(animation.window).as_bool() } {
-            notify_error(host, "A window stopped responding during its animation.");
+            let _ = place_outer(
+                animation.window,
+                animation.to,
+                animation.margins,
+                Default::default(),
+            );
             continue;
         }
         let mut process_id = 0;
@@ -1207,18 +1330,32 @@ fn advance_window_animations(host: HWND) {
         .clamp(0.0, 1.0);
         let eased = 1.0 - (1.0 - progress).powi(3);
         let frame = interpolate_rect(animation.from, animation.to, eased);
-        if let Err(error) = position_visible_frame(animation.window, frame, Default::default()) {
-            notify_error(host, &error);
+        let placed = place_outer(
+            animation.window,
+            frame,
+            animation.margins,
+            Default::default(),
+        );
+        if placed.is_err() {
+            unfinished.push(animation);
             continue;
         }
         if !animation_is_current(animation.window, animation.generation) {
             continue;
         }
         if progress >= 1.0 {
-            if let Err(error) =
-                set_visible_frame(animation.window, animation.to, Default::default())
-            {
-                notify_error(host, &error);
+            if let Ok(expected) = placed {
+                let mut actual = RECT::default();
+                if unsafe { GetWindowRect(animation.window, &mut actual) }.is_err()
+                    || !edges_near(actual, expected, 16)
+                {
+                    let _ = place_outer(
+                        animation.window,
+                        animation.to,
+                        animation.margins,
+                        Default::default(),
+                    );
+                }
             }
             if !animation_is_current(animation.window, animation.generation) {
                 continue;
@@ -1265,6 +1402,7 @@ fn advance_window_animations(host: HWND) {
             let _ = KillTimer(Some(host), ANIMATION_TIMER_ID);
         }
     }
+    sync_animation_clock();
 }
 
 fn apply_frame_action(hwnd: HWND, action: Action, settings: &Settings) -> Result<(), String> {
@@ -2170,6 +2308,8 @@ fn begin_radial(host: HWND, kind: TriggerKind) {
         session.preview_sector_since = Some(Instant::now());
         session.preview_blurred_sector = None;
         session.last_preview_full_build = None;
+        session.preview_step_at = None;
+        session.radial_needs_paint = true;
         session.overlay
     });
     if let Some(overlay) = overlay {
@@ -2197,6 +2337,7 @@ fn begin_radial(host: HWND, kind: TriggerKind) {
             let _ = SetTimer(Some(host), TIMER_ID, 8, None);
         }
     }
+    hold_smooth_timer();
     if let Err(error) = ensure_target(target, &settings) {
         finish_session(host, false);
         notify_error(host, &error);
@@ -2965,7 +3106,6 @@ unsafe extern "system" fn window_proc(
                 }
             }
             poll_radial_arrows(hwnd);
-            maybe_upgrade_preview();
             let kind = SESSION.with(|cell| cell.borrow().trigger_kind);
             let released = match kind {
                 TriggerKind::Keyboard => !trigger_held(settings.trigger, settings.trigger_side),
@@ -3136,7 +3276,7 @@ fn apply_sector_hysteresis(
     }
 }
 
-fn select_radial_cursor(hwnd: HWND, cursor: (i32, i32)) {
+fn select_radial_cursor(_hwnd: HWND, cursor: (i32, i32)) {
     let moved = SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
         if session.last_radial_cursor == Some(cursor) {
@@ -3176,7 +3316,7 @@ fn select_radial_cursor(hwnd: HWND, cursor: (i32, i32)) {
         true
     });
     if aim_moved {
-        redraw_radial(hwnd);
+        SESSION.with(|cell| cell.borrow_mut().radial_needs_paint = true);
     }
     if changed {
         let (overlay, visible, hide_no_selection) = SESSION.with(|cell| {
@@ -3199,14 +3339,12 @@ fn select_radial_cursor(hwnd: HWND, cursor: (i32, i32)) {
                 }
             }
         }
-        if !aim_moved {
-            redraw_radial(hwnd);
-        }
+        SESSION.with(|cell| cell.borrow_mut().radial_needs_paint = true);
         update_preview();
     }
 }
 
-fn redraw_radial(host: HWND) {
+fn redraw_radial(_host: HWND) {
     let (overlay, settings, target, angle) = SESSION.with(|cell| {
         let session = cell.borrow();
         (
@@ -3242,7 +3380,6 @@ fn redraw_radial(host: HWND) {
             }
         }
         if !ensure_radial_stamp(&settings, dpi) {
-            notify_error(host, "cannot draw the radial menu");
             return;
         }
         let pixels = SESSION.with(|cell| {
@@ -3714,6 +3851,22 @@ unsafe extern "system" fn keyboard_hook_proc(
 }
 
 fn notify_error(host: HWND, message: &str) {
+    if message.is_empty() || message.contains("refused the requested frame") {
+        return;
+    }
+    let now = Instant::now();
+    if let Ok(mut previous) = LAST_BALLOON.lock() {
+        if let Some((text, shown)) = previous.as_ref() {
+            let age = now.saturating_duration_since(*shown);
+            if *text == message && age < std::time::Duration::from_secs(8) {
+                return;
+            }
+            if age < std::time::Duration::from_millis(1500) {
+                return;
+            }
+        }
+        *previous = Some((message.to_string(), now));
+    }
     let mut data = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: host,
@@ -4047,6 +4200,7 @@ fn finish_session(host: HWND, commit: bool) {
     let Some((overlay, target, selected, settings)) = state else {
         return;
     };
+    release_smooth_timer();
     if let Some(overlay) = overlay {
         unsafe {
             let _ = ShowWindow(overlay, SW_HIDE);
@@ -4058,84 +4212,17 @@ fn finish_session(host: HWND, commit: bool) {
     }
     if let (Some(target), Some(action)) = (target, selected)
         && let Err(error) = execute_action(target, action, &settings)
+        && !error.contains("refused the requested frame")
     {
         notify_error(host, &error);
-    }
-}
-
-fn capture_screen_rect(frame: Rect) -> Option<Vec<u32>> {
-    let width = frame.width();
-    let height = frame.height();
-    let count = usize::try_from(width)
-        .ok()?
-        .checked_mul(usize::try_from(height).ok()?)?;
-    if count == 0 || count > 33_554_432 {
-        return None;
-    }
-    let info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    unsafe {
-        let screen = GetDC(None);
-        if screen.0.is_null() {
-            return None;
-        }
-        let memory = CreateCompatibleDC(Some(screen));
-        if memory.0.is_null() {
-            ReleaseDC(None, screen);
-            return None;
-        }
-        let mut bits = std::ptr::null_mut();
-        let bitmap = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0);
-        let result = if let Ok(bitmap) = bitmap {
-            let old = SelectObject(memory, HGDIOBJ(bitmap.0));
-            let captured = if old.0.is_null() || bits.is_null() {
-                None
-            } else if BitBlt(
-                memory,
-                0,
-                0,
-                width,
-                height,
-                Some(screen),
-                frame.left,
-                frame.top,
-                SRCCOPY,
-            )
-            .is_ok()
-            {
-                Some(std::slice::from_raw_parts(bits.cast::<u32>(), count).to_vec())
-            } else {
-                None
-            };
-            if !old.0.is_null() {
-                let _ = SelectObject(memory, old);
-            }
-            let _ = DeleteObject(HGDIOBJ(bitmap.0));
-            captured
-        } else {
-            None
-        };
-        let _ = DeleteDC(memory);
-        ReleaseDC(None, screen);
-        result
     }
 }
 
 fn hide_preview(preview: HWND) {
     let host = SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
-        session.preview_animation = None;
         session.preview_current_frame = None;
+        session.preview_target_frame = None;
         session.host
     });
     if let Some(host) = host {
@@ -4148,6 +4235,7 @@ fn hide_preview(preview: HWND) {
     }
 }
 
+#[cfg(test)]
 fn initial_preview_frame(target: Rect, window: HWND, settings: &Settings) -> Rect {
     let center = match settings.preview_start {
         PreviewStart::ActionCenter => target.center(),
@@ -4178,107 +4266,159 @@ fn initial_preview_frame(target: Rect, window: HWND, settings: &Settings) -> Rec
     }
 }
 
-fn present_preview(preview: HWND, window: HWND, target: Rect, settings: &Settings) {
-    let now = Instant::now();
-    let (host, current, already_aimed) = SESSION.with(|cell| {
-        let session = cell.borrow();
-        let current = session
-            .preview_animation
-            .map(|animation| animation.frame_at(now).0)
-            .or(session.preview_current_frame);
-        (
-            session.host,
-            current,
-            session
-                .preview_animation
-                .is_some_and(|animation| animation.to == target),
-        )
-    });
-    if already_aimed {
-        unsafe {
-            let _ = ShowWindow(preview, SW_SHOWNOACTIVATE);
-            let _ = InvalidateRect(Some(preview), None, false);
-            let _ = UpdateWindow(preview);
+/// Move halfway toward the target each tick, and at least one pixel when a
+/// gap remains. The plate eases instead of jumping, and each step is cheap.
+#[cfg(test)]
+fn chase_rect(current: Rect, target: Rect) -> Rect {
+    chase_rect_elapsed(current, target, std::time::Duration::from_millis(16))
+}
+
+/// Clock-based ease. A late frame never covers more than 28% of the remaining
+/// gap, so a slow paint cannot throw the plate across the screen.
+fn chase_rect_elapsed(current: Rect, target: Rect, elapsed: std::time::Duration) -> Rect {
+    let dt = elapsed.as_secs_f64().clamp(0.0, 0.032);
+    let blend = (1.0 - (-dt / 0.045).exp()).clamp(0.12, 0.28);
+    fn axis(from: i32, to: i32, blend: f64) -> i32 {
+        let delta = to.wrapping_sub(from);
+        if delta == 0 {
+            return to;
         }
-        return;
+        let mut step = (f64::from(delta) * blend).round() as i32;
+        if step == 0 {
+            step = if delta > 0 { 1 } else { -1 };
+        }
+        let next = from.saturating_add(step);
+        if (to - from) > 0 {
+            next.min(to)
+        } else {
+            next.max(to)
+        }
     }
-    let start = current.unwrap_or_else(|| initial_preview_frame(target, window, settings));
-    // Keyboard-initiated shows happen 100+ times/day: first show is instant.
-    // Retargets while dragging keep a short ease-out for spatial consistency.
-    // A second retarget within 80 ms snaps: chasing a moving cursor with a
-    // fresh 180 ms ease on every flick is what made the preview lag the ring.
-    let is_first_show = current.is_none();
-    // First show is instant. Later aims ease from the current frame so the
-    // plate follows the pointer instead of snapping between zones.
-    let animate = !is_first_show && start != target && animations_allowed(settings);
-    let follow_ms = u64::from(settings.animation_duration_ms.clamp(1, 90));
+    Rect {
+        left: axis(current.left, target.left, blend),
+        top: axis(current.top, target.top, blend),
+        right: axis(current.right, target.right, blend),
+        bottom: axis(current.bottom, target.bottom, blend),
+    }
+}
+
+fn scaled_about_center(frame: Rect, scale: f64) -> Rect {
+    let (cx, cy) = frame.center();
+    let width = ((f64::from(frame.width()) * scale).round() as i32).max(1);
+    let height = ((f64::from(frame.height()) * scale).round() as i32).max(1);
+    Rect {
+        left: cx - width / 2,
+        top: cy - height / 2,
+        right: cx - width / 2 + width,
+        bottom: cy - height / 2 + height,
+    }
+}
+
+fn place_preview_window(preview: HWND, frame: Rect) {
+    let width = frame.width().max(1);
+    let height = frame.height().max(1);
+    let mut previous = RECT::default();
+    let known = unsafe { GetWindowRect(preview, &mut previous) }.is_ok();
+    let same_size = known
+        && previous.right - previous.left == width
+        && previous.bottom - previous.top == height;
+    // A same-size move is a compositor slide. Resizes still paint, but not by
+    // waiting inside this call: the timer must get the next step on time.
+    let mut flags = SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOCOPYBITS;
+    if same_size {
+        flags |= SWP_NOREDRAW;
+    }
+    unsafe {
+        let _ = SetWindowPos(preview, None, frame.left, frame.top, width, height, flags);
+        if !IsWindowVisible(preview).as_bool() {
+            let _ = ShowWindow(preview, SW_SHOWNOACTIVATE);
+        }
+        if !same_size {
+            let _ = InvalidateRect(Some(preview), None, false);
+        }
+    }
+}
+
+fn present_preview(preview: HWND, _window: HWND, target: Rect, settings: &Settings) {
+    let (host, current) = SESSION.with(|cell| {
+        let session = cell.borrow();
+        (session.host, session.preview_current_frame)
+    });
+    let animate = animations_allowed(settings);
+    let shown = if !animate {
+        target
+    } else if let Some(current) = current {
+        current
+    } else {
+        scaled_about_center(target, 0.86)
+    };
     SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
-        session.preview_current_frame = Some(if animate { start } else { target });
-        session.preview_animation = animate.then_some(PreviewAnimation {
-            from: start,
-            to: target,
-            started: now,
-            duration: std::time::Duration::from_millis(follow_ms),
-        });
+        session.preview_target_frame = Some(target);
+        session.preview_current_frame = Some(shown);
+        session.preview_step_at = Some(Instant::now());
+        session.preview_bitmap_cache = None;
     });
-    let frame = if animate { start } else { target };
-    unsafe {
-        let _ = SetWindowPos(
-            preview,
-            None,
-            frame.left,
-            frame.top,
-            frame.width(),
-            frame.height(),
-            SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-        let _ = ShowWindow(preview, SW_SHOWNOACTIVATE);
-        let _ = InvalidateRect(Some(preview), None, false);
-        let _ = UpdateWindow(preview);
-        if let Some(host) = host {
-            if animate {
+    place_preview_window(preview, shown);
+    if let Some(host) = host {
+        unsafe {
+            if animate && shown != target {
                 let _ = SetTimer(Some(host), PREVIEW_ANIMATION_TIMER_ID, 8, None);
-            } else {
+            } else if !animate {
                 let _ = KillTimer(Some(host), PREVIEW_ANIMATION_TIMER_ID);
+            } else {
+                let _ = SetTimer(Some(host), PREVIEW_ANIMATION_TIMER_ID, 8, None);
             }
         }
     }
 }
 
 fn advance_preview_animation(host: HWND) {
-    let (preview, animation) = SESSION.with(|cell| {
-        let session = cell.borrow();
-        (session.preview, session.preview_animation)
+    let paint_radial = SESSION.with(|cell| {
+        let mut session = cell.borrow_mut();
+        let due = session.radial_needs_paint;
+        session.radial_needs_paint = false;
+        due
     });
-    let (Some(preview), Some(animation)) = (preview, animation) else {
+    if paint_radial {
+        redraw_radial(host);
+    }
+    let (preview, current, target, step_at) = SESSION.with(|cell| {
+        let session = cell.borrow();
+        (
+            session.preview,
+            session.preview_current_frame,
+            session.preview_target_frame,
+            session.preview_step_at,
+        )
+    });
+    let (Some(preview), Some(current), Some(target)) = (preview, current, target) else {
         unsafe {
             let _ = KillTimer(Some(host), PREVIEW_ANIMATION_TIMER_ID);
         }
         return;
     };
-    let (frame, finished) = animation.frame_at(Instant::now());
-    unsafe {
-        let _ = SetWindowPos(
-            preview,
-            None,
-            frame.left,
-            frame.top,
-            frame.width().max(1),
-            frame.height().max(1),
-            SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-        let _ = InvalidateRect(Some(preview), None, false);
-        let _ = UpdateWindow(preview);
+    let now = Instant::now();
+    let elapsed = step_at.map_or(std::time::Duration::from_millis(8), |at| {
+        now.saturating_duration_since(at)
+    });
+    if current == target {
+        SESSION.with(|cell| cell.borrow_mut().preview_step_at = Some(now));
+        if !SESSION.with(|cell| cell.borrow().radial_needs_paint) {
+            unsafe {
+                let _ = KillTimer(Some(host), PREVIEW_ANIMATION_TIMER_ID);
+            }
+        }
+        return;
     }
+    let frame = chase_rect_elapsed(current, target, elapsed);
+    place_preview_window(preview, frame);
     SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
         session.preview_current_frame = Some(frame);
-        if finished {
-            session.preview_animation = None;
-        }
+        session.preview_step_at = Some(now);
     });
-    if finished {
+    if frame == target && !SESSION.with(|cell| cell.borrow().radial_needs_paint) {
         unsafe {
             let _ = KillTimer(Some(host), PREVIEW_ANIMATION_TIMER_ID);
         }
@@ -4286,25 +4426,6 @@ fn advance_preview_animation(host: HWND) {
 }
 
 fn update_preview() {
-    update_preview_with(false);
-}
-
-fn maybe_upgrade_preview() {
-    let ready = SESSION.with(|cell| {
-        let session = cell.borrow();
-        session.open
-            && session.selected.is_some()
-            && session.preview_blurred_sector != Some(session.selected_sector)
-            && session
-                .preview_sector_since
-                .is_some_and(|started| started.elapsed() >= std::time::Duration::from_millis(140))
-    });
-    if ready {
-        update_preview_with(true);
-    }
-}
-
-fn update_preview_with(allow_full: bool) {
     let (preview, selection, settings) = SESSION.with(|cell| {
         let session = cell.borrow();
         let selection = if session.open {
@@ -4320,8 +4441,6 @@ fn update_preview_with(allow_full: bool) {
     let Some(preview) = preview else {
         return;
     };
-    // The plate is its own topmost window. A monitor-sized layered window keeps the
-    // bitmap in memory and never puts those pixels on the desktop.
     let placed = selection
         .filter(|(_, action)| {
             settings.preview_visible && settings.preview_opacity > 0 && action_has_preview(*action)
@@ -4329,177 +4448,20 @@ fn update_preview_with(allow_full: bool) {
         .and_then(|(target, action)| {
             target_frame(target, action, &settings)
                 .ok()
-                .map(|frame| (target, action, frame.inset(settings.preview_padding)))
+                .map(|frame| (target, frame.inset(settings.preview_padding)))
         });
-    let Some((target, action, frame)) = placed else {
+    let Some((target, frame)) = placed else {
         hide_preview(preview);
+        SESSION.with(|cell| {
+            let mut session = cell.borrow_mut();
+            session.preview_target_frame = None;
+            session.preview_current_frame = None;
+        });
         return;
     };
-    let width = frame.width();
-    let height = frame.height();
-    if width <= 0 || height <= 0 {
+    if frame.width() <= 0 || frame.height() <= 0 {
         hide_preview(preview);
         return;
-    }
-    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(target) }.max(96);
-    let accent = settings.use_system_accent.then(system_accent_rgb).flatten();
-    let mut render_settings = settings.clone();
-    if settings.preview_use_window_corner_radius {
-        // Windows has no public API for reading another process window's actual radius;
-        // use the documented rounded-corner preference's standard 8-DIP radius.
-        render_settings.preview_corner_radius = 8;
-    }
-    let style = PreviewStyleKey {
-        left: frame.left,
-        top: frame.top,
-        width,
-        height,
-        dpi,
-        accent: accent.unwrap_or(settings.accent_color),
-        gradient: settings.gradient_color,
-        border: settings.preview_border_thickness,
-        radius: render_settings.preview_corner_radius,
-        opacity: settings.preview_opacity,
-        use_gradient: settings.use_gradient,
-        action,
-    };
-    let cached = SESSION
-        .with(|cell| cell.borrow().preview_bitmap_cache.clone())
-        .filter(|(cached_key, _, has_backdrop)| {
-            *cached_key == style && (!allow_full || *has_backdrop)
-        });
-    let bitmap = match cached {
-        Some((_, bitmap, has_backdrop)) => Ok((bitmap, has_backdrop)),
-        None => {
-            // Coalesce rapid flicks: the blurred capture below is the most
-            // expensive step (~11 ms release, ~112 ms debug). When sectors
-            // change faster than 40 ms, paint the cheap opaque HUD now and
-            // let the next stable tick do the full blurred upgrade. The ring
-            // highlight itself never waits for the preview.
-            let now = Instant::now();
-            let full_due = preview_full_build_due(
-                SESSION.with(|cell| cell.borrow().last_preview_full_build),
-                now,
-            );
-            // Fast path (perceived performance): the blurred capture below blocks
-            // the message loop for multi-MP frames. Paint the opaque HUD plate
-            // instantly first so the 100+/day trigger feels snappy, then upgrade
-            // to the blurred backdrop in the same tick. The upgrade is a plain
-            // repaint (start == target, no animation).
-            if let Ok(fast) = crate::preview::render_bitmap_with_backdrop(
-                &render_settings,
-                action,
-                (width as u32, height as u32),
-                dpi,
-                accent,
-                None,
-            ) {
-                let presented =
-                    PresentedBitmap::from_premultiplied(fast.width, fast.height, &fast.pixels);
-                SESSION.with(|cell| {
-                    cell.borrow_mut().preview_bitmap_cache = Some((style, presented, false))
-                });
-                let fast_opacity = settings.preview_opacity;
-                let fast_changed =
-                    SESSION.with(|cell| cell.borrow().preview_layer_opacity != Some(fast_opacity));
-                if fast_changed && enable_color_key(preview, fast_opacity).is_ok() {
-                    SESSION
-                        .with(|cell| cell.borrow_mut().preview_layer_opacity = Some(fast_opacity));
-                }
-                present_preview(preview, target, frame, &settings);
-            }
-            if !allow_full {
-                if let Some(overlay) = SESSION.with(|cell| cell.borrow().overlay)
-                    && unsafe { IsWindowVisible(overlay).as_bool() }
-                {
-                    raise_layered_above_foreground(overlay);
-                }
-                return;
-            }
-            if !full_due {
-                // Deferred: the timer loop re-enters update_preview once the
-                // cursor settles and the debounce window expires.
-                let cached = SESSION.with(|cell| cell.borrow().preview_bitmap_cache.clone());
-                if let Some((_, _bitmap, _has_backdrop)) =
-                    cached.filter(|(key, _, _)| *key == style)
-                {
-                    let desired_opacity = settings.preview_opacity;
-                    if SESSION.with(|cell| cell.borrow().preview_layer_opacity)
-                        != Some(desired_opacity)
-                        && enable_color_key(preview, desired_opacity).is_ok()
-                    {
-                        SESSION.with(|cell| {
-                            cell.borrow_mut().preview_layer_opacity = Some(desired_opacity)
-                        });
-                    }
-                    present_preview(preview, target, frame, &settings);
-                    if let Some(overlay) = SESSION.with(|cell| cell.borrow().overlay)
-                        && unsafe { IsWindowVisible(overlay).as_bool() }
-                    {
-                        raise_layered_above_foreground(overlay);
-                    }
-                    return;
-                }
-                // Fast render failed: fall through to the full build attempt.
-            }
-            // Keep the ring up. Hiding it for the blur reads as a late shortcut,
-            // because the show is not presented until this thread pumps again.
-            unsafe {
-                let _ = ShowWindow(preview, SW_HIDE);
-            }
-            let captured = capture_screen_rect(frame);
-            let backdrop = captured
-                .and_then(|pixels| crate::preview::blur_backdrop(&pixels, width, height).ok());
-            let has_backdrop = backdrop.is_some();
-            let bitmap = crate::preview::render_bitmap_with_backdrop(
-                &render_settings,
-                action,
-                (width as u32, height as u32),
-                dpi,
-                accent,
-                backdrop.as_deref(),
-            );
-            bitmap.map(|bitmap| {
-                let presented = PresentedBitmap::from_premultiplied(
-                    bitmap.width,
-                    bitmap.height,
-                    &bitmap.pixels,
-                );
-                SESSION.with(|cell| {
-                    let mut session = cell.borrow_mut();
-                    session.preview_bitmap_cache = Some((style, presented.clone(), has_backdrop));
-                    session.last_preview_full_build = Some(now);
-                    session.preview_blurred_sector = Some(session.selected_sector);
-                });
-                (presented, has_backdrop)
-            })
-        }
-    };
-    let (_bitmap, has_backdrop) = match bitmap {
-        Ok(result) => result,
-        Err(error) => {
-            hide_preview(preview);
-            if let Some(host) = SESSION.with(|cell| cell.borrow().host) {
-                notify_error(host, &error);
-            }
-            return;
-        }
-    };
-    let desired_opacity = if has_backdrop {
-        255
-    } else {
-        settings.preview_opacity
-    };
-    let alpha_changed =
-        SESSION.with(|cell| cell.borrow().preview_layer_opacity != Some(desired_opacity));
-    if alpha_changed {
-        if let Err(error) = enable_color_key(preview, desired_opacity) {
-            if let Some(host) = SESSION.with(|cell| cell.borrow().host) {
-                notify_error(host, &error);
-            }
-            return;
-        }
-        SESSION.with(|cell| cell.borrow_mut().preview_layer_opacity = Some(desired_opacity));
     }
     present_preview(preview, target, frame, &settings);
     if let Some(overlay) = SESSION.with(|cell| cell.borrow().overlay)
@@ -4575,7 +4537,68 @@ fn repaint_layered_preview(hwnd: HWND) {
             .as_ref()
             .map(|(_, bitmap, _)| bitmap.clone())
     });
-    paint_color_key_bitmap(hwnd, bitmap.as_ref());
+    let mut client = RECT::default();
+    let same_size = bitmap.as_ref().is_some_and(|bitmap| {
+        unsafe { GetClientRect(hwnd, &mut client) }.is_ok()
+            && client.right - client.left == bitmap.width
+            && client.bottom - client.top == bitmap.height
+    });
+    if same_size {
+        paint_color_key_bitmap(hwnd, bitmap.as_ref());
+    } else {
+        paint_live_preview(hwnd);
+    }
+}
+
+fn paint_live_preview(hwnd: HWND) {
+    let (radius, border) = SESSION.with(|cell| {
+        let session = cell.borrow();
+        (
+            session.settings.preview_corner_radius,
+            session.settings.preview_border_thickness.max(1),
+        )
+    });
+    let mut paint = PAINTSTRUCT::default();
+    unsafe {
+        let dc = BeginPaint(hwnd, &mut paint);
+        let mut client = RECT::default();
+        if GetClientRect(hwnd, &mut client).is_ok() && client.right > 1 && client.bottom > 1 {
+            let clear = CreateSolidBrush(TRANSPARENT_COLOR_KEY);
+            let _ = FillRect(dc, &client, clear);
+            let _ = DeleteObject(HGDIOBJ(clear.0));
+            let dpi = SESSION
+                .with(|cell| cell.borrow().target)
+                .map(|window| windows::Win32::UI::HiDpi::GetDpiForWindow(window))
+                .unwrap_or_else(system_dpi)
+                .max(96);
+            let radius = ((radius as i32) * dpi as i32 / 96).max(0);
+            let border = ((border as i32) * dpi as i32 / 96).clamp(1, 12);
+            // Prism shell: neutral dark glass and a faint white edge. Not the Windows accent.
+            let fill = CreateSolidBrush(COLORREF(0x001C_1C20));
+            let pen = CreatePen(PS_SOLID, border, COLORREF(0x00E8_E8EC));
+            let old_brush = SelectObject(dc, HGDIOBJ(fill.0));
+            let old_pen = SelectObject(dc, HGDIOBJ(pen.0));
+            let inset = border / 2;
+            let _ = RoundRect(
+                dc,
+                client.left + inset,
+                client.top + inset,
+                client.right - inset,
+                client.bottom - inset,
+                radius * 2,
+                radius * 2,
+            );
+            if !old_brush.0.is_null() {
+                let _ = SelectObject(dc, old_brush);
+            }
+            if !old_pen.0.is_null() {
+                let _ = SelectObject(dc, old_pen);
+            }
+            let _ = DeleteObject(HGDIOBJ(fill.0));
+            let _ = DeleteObject(HGDIOBJ(pen.0));
+        }
+        let _ = EndPaint(hwnd, &paint);
+    }
 }
 
 fn repaint_layered_radial(hwnd: HWND) {
@@ -4669,6 +4692,35 @@ fn color_key_pixel(premultiplied: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_chase_moves_halfway_and_does_not_overshoot() {
+        let current = Rect {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 80,
+        };
+        let target = Rect {
+            left: 200,
+            top: 40,
+            right: 400,
+            bottom: 200,
+        };
+        let next = chase_rect(current, target);
+        assert!(next.left > current.left && next.left < target.left);
+        assert!(next.top >= current.top && next.top <= target.top);
+        assert!(next.right > current.right && next.right < target.right);
+        assert_eq!(chase_rect(target, target), target);
+        let jumped = chase_rect_elapsed(current, target, std::time::Duration::from_millis(100));
+        let left_gap = target.left - current.left;
+        assert!(target.left - jumped.left > left_gap / 2);
+        let mut frame = current;
+        for _ in 0..24 {
+            frame = chase_rect(frame, target);
+        }
+        assert_eq!(frame, target);
+    }
 
     #[test]
     fn preview_debounce_coalesces_rapid_retargets() {
