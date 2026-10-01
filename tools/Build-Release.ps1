@@ -5,6 +5,47 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path "$PSScriptRoot\..").Path
+
+function Sign-OrbitInstaller([string]$Installer) {
+    $signDir = Join-Path $env:USERPROFILE '.orbit\signing'
+    $keyPath = Join-Path $signDir 'updater.key'
+    $passPath = Join-Path $signDir 'updater.key.password'
+    if (-not (Test-Path -LiteralPath $keyPath) -or -not (Test-Path -LiteralPath $passPath)) {
+        throw 'Orbit updater signing key is missing from the user signing directory'
+    }
+    $tauri = $env:ORBIT_TAURI_CLI
+    if (-not $tauri) {
+        $tauri = Join-Path $env:USERPROFILE 'Desktop\Work\Prism\node_modules\@tauri-apps\cli\tauri.js'
+    }
+    if (-not (Test-Path -LiteralPath $tauri)) { throw 'Tauri CLI is required to sign the installer' }
+    $sig = "$Installer.sig"
+    if (Test-Path -LiteralPath $sig) { Remove-Item -LiteralPath $sig -Force }
+    $password = [System.IO.File]::ReadAllText($passPath).Trim()
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = 'node'
+    $start.Arguments = '"' + $tauri + '" signer sign "' + $Installer + '"'
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.CreateNoWindow = $true
+    $start.EnvironmentVariables['TAURI_SIGNING_PRIVATE_KEY_PATH'] = $keyPath
+    $start.EnvironmentVariables['TAURI_SIGNING_PRIVATE_KEY_PASSWORD'] = $password
+    $start.EnvironmentVariables['CI'] = 'true'
+    $process = [System.Diagnostics.Process]::Start($start)
+    $outputTask = $process.StandardOutput.ReadToEndAsync()
+    $errorTask = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $outputTask.Wait() | Out-Null
+    $errorTask.Wait() | Out-Null
+    $signerError = $errorTask.Result
+    $password = $null
+    if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $sig)) {
+        $safe = ($signerError -split "`n" | Where-Object { $_ -notmatch 'untrusted|secret|password|dW50' }) -join ' '
+        throw "Installer signing failed. $safe"
+    }
+    $sig
+}
+
 Push-Location $projectRoot
 try {
     if (-not (Test-Path -LiteralPath $Compiler)) {
@@ -49,13 +90,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
     $installer = Join-Path $dist "OrbitSetup-$version-x64.exe"
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
-    [System.IO.File]::WriteAllText((Join-Path $dist 'update-unsigned.json'), (@{
-        version = $version
-        installer_url = "https://github.com/Hi9841/Orbit/releases/download/v$version/OrbitSetup-$version-x64.exe"
-        sha256 = $hash
-        notes = 'See the release notes for changes and known limitations.'
-        signature = ''
-    } | ConvertTo-Json))
     if (-not $SkipSourceArchive) {
         $stage = Join-Path $projectRoot ('.tools\source-' + [guid]::NewGuid().ToString('N'))
         $archiveRoot = Join-Path $stage "Orbit-$version"
@@ -98,32 +132,20 @@ directory = "vendor"
         if (-not ([System.IO.Path]::GetFullPath($stage).StartsWith($allowedRoot, [System.StringComparison]::OrdinalIgnoreCase))) { throw 'Unexpected source staging path' }
         Remove-Item -LiteralPath $stage -Recurse -Force
     }
-    $releaseFiles = @($installer, (Join-Path $dist 'THIRD-PARTY-NOTICES.txt'))
+    $signature = Sign-OrbitInstaller $installer
+    $latest = Join-Path $dist 'latest.json'
+    $pubDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss') + 'Z'
+    & (Join-Path $projectRoot 'target\release\orbit-release.exe') pack $version $signature $latest $pubDate
+    if ($LASTEXITCODE -ne 0) { throw 'latest.json was not written' }
+    & (Join-Path $projectRoot 'target\release\orbit-release.exe') verify $latest $installer
+    if ($LASTEXITCODE -ne 0) { throw 'Installer signature does not match latest.json' }
+    $releaseFiles = @($installer, $signature, $latest, (Join-Path $dist 'THIRD-PARTY-NOTICES.txt'))
     if (-not $SkipSourceArchive) { $releaseFiles += $sourceZip }
     $checksums = $releaseFiles | ForEach-Object { Get-Item -LiteralPath $_ } | Sort-Object Name | ForEach-Object {
         '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name
     }
     [System.IO.File]::WriteAllLines((Join-Path $dist 'SHA256SUMS.txt'), $checksums)
-    $seedPath = Join-Path $env:USERPROFILE '.orbit\signing\seed'
-    if (Test-Path -LiteralPath $seedPath) {
-        $env:ORBIT_UPDATE_SIGNING_SEED = [System.IO.File]::ReadAllText($seedPath).Trim()
-        $unsigned = Join-Path $dist 'update-unsigned.json'
-        $signed = Join-Path $dist 'update.json'
-        $manifest = @{
-            version = $version
-            installer_url = "https://github.com/Hi9841/Orbit/releases/download/v$version/OrbitSetup-$version-x64.exe"
-            sha256 = $hash
-            notes = "Orbit $version"
-            signature = ''
-        } | ConvertTo-Json
-        [System.IO.File]::WriteAllText($unsigned, $manifest)
-        if (Test-Path -LiteralPath $signed) { Remove-Item -LiteralPath $signed }
-        & cargo run --locked --quiet --bin orbit-release -- sign $unsigned $signed
-        if ($LASTEXITCODE -ne 0) { throw 'Update manifest signing failed' }
-        Remove-Item -LiteralPath $unsigned
-        Remove-Item Env:ORBIT_UPDATE_SIGNING_SEED -ErrorAction SilentlyContinue
-    }
-    "status: built`nversion: $version`ninstaller: $installer`nsha256: $hash"
+    "status: built`nversion: $version`ninstaller: $installer`nsignature: $signature`nlatest: $latest`nsha256: $hash"
 } finally {
     Pop-Location
 }

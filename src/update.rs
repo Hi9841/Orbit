@@ -1,8 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-use ed25519_dalek::{Signature, VerifyingKey};
 use semver::Version;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
 use std::{
     fs,
     io::{Read, Write},
@@ -13,70 +11,156 @@ use std::{
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_INSTALLER_BYTES: u64 = 250 * 1024 * 1024;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Manifest {
     pub version: String,
     pub installer_url: String,
-    pub sha256: String,
     pub notes: String,
     pub signature: String,
 }
 
 impl Manifest {
-    pub fn signed_payload(&self) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Payload<'a> {
-            format: &'static str,
-            version: &'a str,
-            installer_url: &'a str,
-            sha256: &'a str,
-            notes: &'a str,
-        }
-        serde_json::to_vec(&Payload {
-            format: "orbit-update-v1",
-            version: &self.version,
-            installer_url: &self.installer_url,
-            sha256: &self.sha256,
-            notes: &self.notes,
-        })
-        .expect("update payload serialization must succeed")
-    }
-
-    pub fn verify(&self, public_key_base64: &str, current_version: &str) -> Result<bool, String> {
-        self.verify_channel(public_key_base64, current_version, false)
+    pub fn verify(&self, current_version: &str) -> Result<bool, String> {
+        self.verify_channel(current_version, false)
     }
 
     pub fn verify_channel(
         &self,
-        public_key_base64: &str,
         current_version: &str,
         include_development: bool,
     ) -> Result<bool, String> {
-        let key_bytes = STANDARD
-            .decode(public_key_base64)
-            .map_err(|_| "invalid update public key")?;
-        let key_array: [u8; 32] = key_bytes
-            .try_into()
-            .map_err(|_| "invalid update public key length")?;
-        let key = VerifyingKey::from_bytes(&key_array).map_err(|_| "invalid update public key")?;
-        let signature_bytes = STANDARD
-            .decode(&self.signature)
-            .map_err(|_| "invalid update signature")?;
-        let signature = Signature::from_slice(&signature_bytes)
-            .map_err(|_| "invalid update signature length")?;
-        key.verify_strict(&self.signed_payload(), &signature)
-            .map_err(|_| "update manifest signature does not match")?;
         validate_url(&self.installer_url)?;
-        if self.sha256.len() != 64 || hex::decode(&self.sha256).is_err() {
-            return Err("invalid installer SHA-256".into());
+        if self.signature.trim().is_empty() {
+            return Err("update signature is missing".into());
         }
-        let offered = Version::parse(&self.version).map_err(|_| "invalid update version")?;
-        let current = Version::parse(current_version).map_err(|_| "invalid current version")?;
+        let offered = Version::parse(self.version.trim().trim_start_matches('v'))
+            .map_err(|_| "invalid update version")?;
+        let current = Version::parse(current_version.trim().trim_start_matches('v'))
+            .map_err(|_| "invalid current version")?;
         if !include_development && !offered.pre.is_empty() && current.pre.is_empty() {
             return Ok(false);
         }
         Ok(offered > current)
     }
+}
+
+/// Verify installer bytes the way Tauri does: base64 public key, base64 `.sig`
+/// body, then minisign over those bytes. A trusted `version:` comment must
+/// match the announced version.
+pub fn verify_installer(
+    bytes: &[u8],
+    signature_base64: &str,
+    public_key_base64: &str,
+    announced_version: &str,
+) -> Result<(), String> {
+    let public_text = decode_base64_text(public_key_base64, "invalid update public key")?;
+    let public_key = minisign_verify::PublicKey::decode(&public_text)
+        .map_err(|_| "invalid update public key")?;
+    let signature_text = decode_base64_text(signature_base64, "invalid update signature")?;
+    let signature = minisign_verify::Signature::decode(&signature_text)
+        .map_err(|_| "invalid update signature")?;
+    public_key
+        .verify(bytes, &signature, true)
+        .map_err(|_| "update signature does not match the installer")?;
+    if let Some(signed) = signed_version(signature.trusted_comment()) {
+        let matches = match (
+            Version::parse(signed.trim().trim_start_matches('v')),
+            Version::parse(announced_version.trim().trim_start_matches('v')),
+        ) {
+            (Ok(signed), Ok(announced)) => signed == announced,
+            _ => signed == announced_version,
+        };
+        if !matches {
+            return Err("signed installer version does not match the update".into());
+        }
+    }
+    Ok(())
+}
+
+fn signed_version(trusted_comment: &str) -> Option<&str> {
+    trusted_comment
+        .split('\t')
+        .find_map(|field| field.strip_prefix("version:"))
+}
+
+fn decode_base64_text(value: &str, label: &str) -> Result<String, String> {
+    let bytes = STANDARD
+        .decode(value.trim())
+        .map_err(|_| label.to_string())?;
+    String::from_utf8(bytes).map_err(|_| label.to_string())
+}
+
+#[derive(Deserialize)]
+struct LatestFile {
+    version: String,
+    #[serde(default)]
+    notes: String,
+    platforms: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct PlatformAsset {
+    signature: String,
+    url: String,
+}
+
+/// Prism and HyperType publish the NSIS installer on both Windows keys.
+/// Prefer the NSIS entry, the same choice as HyperType's updater.
+pub fn manifest_from_latest_json(bytes: &[u8]) -> Result<Option<Manifest>, String> {
+    let latest: LatestFile = serde_json::from_slice(bytes)
+        .map_err(|error| format!("invalid update manifest: {error}"))?;
+    let asset = latest
+        .platforms
+        .get("windows-x86_64-nsis")
+        .or_else(|| latest.platforms.get("windows-x86_64"));
+    let Some(asset) = asset else {
+        return Ok(None);
+    };
+    let asset: PlatformAsset =
+        serde_json::from_value(asset.clone()).map_err(|_| "invalid Windows update entry")?;
+    if asset.signature.trim().is_empty() || asset.url.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Manifest {
+        version: latest.version,
+        installer_url: asset.url,
+        notes: latest.notes,
+        signature: asset.signature,
+    }))
+}
+
+pub fn pack_latest_json(version: &str, signature: &str, pub_date: &str) -> Result<Vec<u8>, String> {
+    let version = version.trim().trim_start_matches('v');
+    if Version::parse(version).is_err() {
+        return Err("invalid update version".into());
+    }
+    if signature.trim().is_empty() {
+        return Err("update signature is missing".into());
+    }
+    if pub_date.len() != 20
+        || !pub_date.ends_with('Z')
+        || pub_date.as_bytes().get(10) != Some(&b'T')
+    {
+        return Err("pub_date must look like 2026-10-01T00:00:00Z".into());
+    }
+    let url = format!(
+        "https://github.com/Hi9841/Orbit/releases/download/v{version}/OrbitSetup-{version}-x64.exe"
+    );
+    validate_url(&url)?;
+    let platform = serde_json::json!({
+        "signature": signature.trim(),
+        "url": url,
+    });
+    let body = serde_json::json!({
+        "version": version,
+        "notes": format!("Orbit {version}"),
+        "pub_date": pub_date,
+        "platforms": {
+            "windows-x86_64": platform,
+            "windows-x86_64-nsis": platform,
+        }
+    });
+    serde_json::to_vec_pretty(&body).map_err(|error| error.to_string())
 }
 
 pub fn configured() -> Option<(&'static str, &'static str)> {
@@ -163,12 +247,17 @@ pub fn report() -> UpdateReport {
     if !newer {
         return UpdateReport::UpToDate;
     }
-    let manifest = configured().and_then(|(url_key, key)| {
-        let _ = url_key;
-        let asset =
-            format!("https://github.com/Hi9841/Orbit/releases/download/v{latest}/update.json");
-        fetch_manifest(&asset, key, true).ok().flatten()
-    });
+    let manifest = match configured() {
+        Some(_) => {
+            let asset =
+                format!("https://github.com/Hi9841/Orbit/releases/download/v{latest}/latest.json");
+            match fetch_manifest(&asset, true) {
+                Ok(manifest) => manifest,
+                Err(error) => return UpdateReport::Failed(error),
+            }
+        }
+        None => None,
+    };
     UpdateReport::Available {
         version: latest,
         manifest,
@@ -222,7 +311,7 @@ pub fn check() -> Result<Option<Manifest>, String> {
 }
 
 pub fn check_channel(include_development: bool) -> Result<Option<Manifest>, String> {
-    let Some((url, key)) = configured() else {
+    let Some((url, _)) = configured() else {
         return Ok(None);
     };
     if include_development && let Some(feed) = option_env!("ORBIT_DEVELOPMENT_RELEASES_URL") {
@@ -258,10 +347,10 @@ pub fn check_channel(include_development: bool) -> Result<Option<Manifest>, Stri
             .into_iter()
             .filter(|release| !release.draft)
             .flat_map(|release| release.assets)
-            .filter(|asset| asset.name == "update.json")
+            .filter(|asset| asset.name == "latest.json")
             .take(5)
         {
-            if let Some(manifest) = fetch_manifest(&asset.browser_download_url, key, true)?
+            if let Some(manifest) = fetch_manifest(&asset.browser_download_url, true)?
                 && best.as_ref().is_none_or(|old| {
                     Version::parse(&manifest.version).unwrap()
                         > Version::parse(&old.version).unwrap()
@@ -272,18 +361,13 @@ pub fn check_channel(include_development: bool) -> Result<Option<Manifest>, Stri
         }
         return Ok(best);
     }
-    fetch_manifest(url, key, include_development)
+    fetch_manifest(url, include_development)
 }
 
-fn fetch_manifest(
-    url: &str,
-    key: &str,
-    include_development: bool,
-) -> Result<Option<Manifest>, String> {
+fn fetch_manifest(url: &str, include_development: bool) -> Result<Option<Manifest>, String> {
     validate_url(url)?;
     let response = match client().get(url).timeout(Duration::from_secs(30)).call() {
         Ok(response) => response,
-        // GitHub has no latest-release asset until the first stable release exists.
         Err(ureq::Error::Status(404, _)) => return Ok(None),
         Err(error) => return Err(format!("update check failed: {error}")),
     };
@@ -297,9 +381,10 @@ fn fetch_manifest(
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Err("update manifest is too large".into());
     }
-    let manifest: Manifest =
-        serde_json::from_slice(&bytes).map_err(|e| format!("invalid update manifest: {e}"))?;
-    if manifest.verify_channel(key, env!("CARGO_PKG_VERSION"), include_development)? {
+    let Some(manifest) = manifest_from_latest_json(&bytes)? else {
+        return Ok(None);
+    };
+    if manifest.verify_channel(env!("CARGO_PKG_VERSION"), include_development)? {
         Ok(Some(manifest))
     } else {
         Ok(None)
@@ -311,7 +396,6 @@ pub fn download(manifest: &Manifest) -> Result<PathBuf, String> {
         return Err("updates are not configured".into());
     };
     if !manifest.verify_channel(
-        key,
         env!("CARGO_PKG_VERSION"),
         crate::settings::Settings::load()?.include_development_versions,
     )? {
@@ -322,19 +406,17 @@ pub fn download(manifest: &Manifest) -> Result<PathBuf, String> {
         .ok_or("settings path has no parent")?
         .join("Updates");
     fs::create_dir_all(&directory).map_err(|e| format!("cannot create update directory: {e}"))?;
-    let mut temp = tempfile::NamedTempFile::new_in(&directory)
-        .map_err(|e| format!("cannot stage update: {e}"))?;
     let mut response = client()
         .get(&manifest.installer_url)
         .call()
         .map_err(|e| format!("cannot download update: {e}"))?
         .into_reader();
-    copy_verified(
-        &mut response,
-        &mut temp,
-        &manifest.sha256,
-        MAX_INSTALLER_BYTES,
-    )?;
+    let bytes = read_capped(&mut response, MAX_INSTALLER_BYTES)?;
+    verify_installer(&bytes, &manifest.signature, key, &manifest.version)?;
+    let mut temp = tempfile::NamedTempFile::new_in(&directory)
+        .map_err(|e| format!("cannot stage update: {e}"))?;
+    temp.write_all(&bytes)
+        .map_err(|e| format!("cannot stage update: {e}"))?;
     temp.as_file()
         .sync_all()
         .map_err(|e| format!("cannot flush update: {e}"))?;
@@ -344,15 +426,10 @@ pub fn download(manifest: &Manifest) -> Result<PathBuf, String> {
     Ok(destination)
 }
 
-fn copy_verified(
-    source: &mut impl Read,
-    target: &mut impl Write,
-    expected: &str,
-    limit: u64,
-) -> Result<(), String> {
-    let mut digest = Sha256::new();
+fn read_capped(source: &mut impl Read, limit: u64) -> Result<Vec<u8>, String> {
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
+    let mut out = Vec::new();
     loop {
         let size = source
             .read(&mut buffer)
@@ -364,18 +441,12 @@ fn copy_verified(
         if total > limit {
             return Err("update installer is too large".into());
         }
-        digest.update(&buffer[..size]);
-        target
-            .write_all(&buffer[..size])
-            .map_err(|e| format!("cannot stage update: {e}"))?;
+        out.extend_from_slice(&buffer[..size]);
     }
     if total == 0 {
         return Err("update installer is empty".into());
     }
-    if hex::encode(digest.finalize()) != expected.to_ascii_lowercase() {
-        return Err("update installer checksum does not match".into());
-    }
-    Ok(())
+    Ok(out)
 }
 
 /// Inno arguments for an in-place update.
@@ -392,7 +463,6 @@ pub fn passive_installer_args() -> &'static str {
 pub fn verify_download(path: &Path, manifest: &Manifest) -> Result<(), String> {
     let (_, key) = configured().ok_or("updates are not configured")?;
     if !manifest.verify_channel(
-        key,
         env!("CARGO_PKG_VERSION"),
         crate::settings::Settings::load()?.include_development_versions,
     )? {
@@ -400,30 +470,29 @@ pub fn verify_download(path: &Path, manifest: &Manifest) -> Result<(), String> {
     }
     let mut source =
         fs::File::open(path).map_err(|error| format!("cannot open staged update: {error}"))?;
-    copy_verified(
-        &mut source,
-        &mut std::io::sink(),
-        &manifest.sha256,
-        MAX_INSTALLER_BYTES,
-    )
+    let bytes = read_capped(&mut source, MAX_INSTALLER_BYTES)?;
+    verify_installer(&bytes, &manifest.signature, key, &manifest.version)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
 
-    fn signed_manifest() -> (Manifest, String) {
-        let key = SigningKey::from_bytes(&[7u8; 32]);
-        let mut manifest = Manifest {
-            version: "9.0.0".into(),
-            installer_url: "https://example.com/OrbitSetup.exe".into(),
-            sha256: "a".repeat(64),
+    fn fixture_key_and_signature() -> (String, String) {
+        let public = "untrusted comment: minisign public key E7620F1842B4E81F\nRWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3\n";
+        let signature = "untrusted comment: signature from minisign secret key\nRWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eKL8OC351vwIasSSbXxwA=\ntrusted comment: timestamp:1555779966\tfile:test\nQtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==\n";
+        (STANDARD.encode(public), STANDARD.encode(signature))
+    }
+
+    fn offer(version: &str, signature: &str) -> Manifest {
+        Manifest {
+            version: version.into(),
+            installer_url:
+                "https://github.com/Hi9841/Orbit/releases/download/v9.0.0/OrbitSetup-9.0.0-x64.exe"
+                    .into(),
             notes: "Changes".into(),
-            signature: String::new(),
-        };
-        manifest.signature = STANDARD.encode(key.sign(&manifest.signed_payload()).to_bytes());
-        (manifest, STANDARD.encode(key.verifying_key().to_bytes()))
+            signature: signature.into(),
+        }
     }
 
     #[test]
@@ -446,37 +515,99 @@ mod tests {
     }
 
     #[test]
-    fn verifies_newer_signed_release() {
-        let (manifest, key) = signed_manifest();
-        assert!(manifest.verify(&key, "0.1.0").unwrap());
-        assert!(!manifest.verify(&key, "9.0.0").unwrap());
+    fn minisign_accepts_the_installer_bytes_and_rejects_a_change() {
+        let (key, signature) = fixture_key_and_signature();
+        verify_installer(b"test", &signature, &key, "9.0.0").unwrap();
+        assert!(verify_installer(b"Test", &signature, &key, "9.0.0").is_err());
+        assert!(verify_installer(b"test", &signature, &STANDARD.encode("nope"), "9.0.0").is_err());
     }
 
     #[test]
-    fn rejects_tampered_download_location() {
-        let (mut manifest, key) = signed_manifest();
-        manifest.installer_url = "https://attacker.example/installer.exe".into();
-        assert!(manifest.verify(&key, "0.1.0").is_err());
-    }
-
-    #[test]
-    fn rejects_unsigned_or_tampered_metadata_and_wrong_key() {
-        let (original, key) = signed_manifest();
-        for field in 0..4 {
-            let mut manifest = original.clone();
-            match field {
-                0 => manifest.version = "10.0.0".into(),
-                1 => manifest.sha256 = "b".repeat(64),
-                2 => manifest.notes.push_str(" changed"),
-                _ => manifest.signature.clear(),
-            }
-            assert!(manifest.verify(&key, "0.1.0").is_err());
-        }
-        assert!(
-            original
-                .verify(&STANDARD.encode([4u8; 32]), "0.1.0")
-                .is_err()
+    fn signed_version_comment_must_match_the_announcement() {
+        assert_eq!(
+            signed_version("timestamp:1\tfile:setup.exe\tversion:1.2.3"),
+            Some("1.2.3")
         );
+        assert_eq!(signed_version("timestamp:1\tfile:setup.exe"), None);
+    }
+
+    #[test]
+    fn latest_json_prefers_the_nsis_signature_and_url() {
+        let raw = r#"{
+            "version": "9.0.0",
+            "notes": "Orbit 9.0.0",
+            "pub_date": "2026-10-01T00:00:00Z",
+            "platforms": {
+                "windows-x86_64": {
+                    "signature": "generic",
+                    "url": "https://github.com/Hi9841/Orbit/releases/download/v9.0.0/generic.exe"
+                },
+                "windows-x86_64-nsis": {
+                    "signature": "nsis-sig",
+                    "url": "https://github.com/Hi9841/Orbit/releases/download/v9.0.0/OrbitSetup-9.0.0-x64.exe"
+                }
+            }
+        }"#;
+        let manifest = manifest_from_latest_json(raw.as_bytes()).unwrap().unwrap();
+        assert_eq!(manifest.signature, "nsis-sig");
+        assert!(manifest.installer_url.ends_with("OrbitSetup-9.0.0-x64.exe"));
+        assert!(manifest.verify("0.2.10").unwrap());
+        assert!(!manifest.verify("9.0.0").unwrap());
+    }
+
+    #[test]
+    fn latest_json_without_a_windows_signature_is_not_installable() {
+        let raw = r#"{"version":"9.0.0","notes":"","platforms":{"darwin-aarch64":{"signature":"x","url":"https://example.com/a"}}}"#;
+        assert!(manifest_from_latest_json(raw.as_bytes()).unwrap().is_none());
+        let empty = r#"{"version":"9.0.0","notes":"","platforms":{"windows-x86_64-nsis":{"signature":"","url":""}}}"#;
+        assert!(
+            manifest_from_latest_json(empty.as_bytes())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn packed_latest_json_matches_the_prism_shape() {
+        let (key, signature) = fixture_key_and_signature();
+        let bytes = pack_latest_json("0.2.11", &signature, "2026-10-01T00:00:00Z").unwrap();
+        let manifest = manifest_from_latest_json(&bytes).unwrap().unwrap();
+        assert_eq!(manifest.version, "0.2.11");
+        assert_eq!(manifest.signature, signature);
+        assert_eq!(
+            manifest.installer_url,
+            "https://github.com/Hi9841/Orbit/releases/download/v0.2.11/OrbitSetup-0.2.11-x64.exe"
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["pub_date"], "2026-10-01T00:00:00Z");
+        assert_eq!(
+            parsed["platforms"]["windows-x86_64"]["signature"],
+            signature
+        );
+        assert_eq!(
+            parsed["platforms"]["windows-x86_64-nsis"]["url"],
+            manifest.installer_url
+        );
+        verify_installer(b"test", &manifest.signature, &key, &manifest.version).unwrap();
+    }
+
+    #[test]
+    fn stable_build_does_not_offer_prerelease() {
+        let manifest = offer("10.0.0-beta.1", "c2ln");
+        assert!(!manifest.verify("0.1.0").unwrap());
+        assert!(manifest.verify_channel("0.1.0", true).unwrap());
+        assert!(manifest.verify("0.2.0-beta.1").unwrap());
+    }
+
+    #[test]
+    fn rejects_an_unsafe_installer_url_and_a_missing_signature() {
+        let mut manifest = offer("9.0.0", "c2ln");
+        manifest.installer_url = "http://example.com/a".into();
+        assert!(manifest.verify("0.1.0").is_err());
+        manifest.installer_url =
+            "https://github.com/Hi9841/Orbit/releases/download/v9.0.0/OrbitSetup.exe".into();
+        manifest.signature.clear();
+        assert!(manifest.verify("0.1.0").is_err());
     }
 
     #[test]
@@ -496,36 +627,10 @@ mod tests {
     }
 
     #[test]
-    fn installer_stream_enforces_hash_size_and_nonempty() {
+    fn installer_stream_rejects_empty_and_oversized_payloads() {
         let payload = b"disposable installer bytes";
-        let expected = hex::encode(Sha256::digest(payload));
-        let mut destination = Vec::new();
-        copy_verified(&mut &payload[..], &mut destination, &expected, 1024).unwrap();
-        assert_eq!(destination, payload);
-        assert!(copy_verified(&mut &payload[..], &mut Vec::new(), &expected, 3).is_err());
-        assert!(copy_verified(&mut &payload[..], &mut Vec::new(), &"0".repeat(64), 1024).is_err());
-        assert!(
-            copy_verified(
-                &mut &b""[..],
-                &mut Vec::new(),
-                &hex::encode(Sha256::digest(b"")),
-                1024
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn stable_build_does_not_offer_prerelease() {
-        let (mut manifest, public_key) = signed_manifest();
-        manifest.version = "10.0.0-beta.1".into();
-        manifest.signature = STANDARD.encode(
-            SigningKey::from_bytes(&[7u8; 32])
-                .sign(&manifest.signed_payload())
-                .to_bytes(),
-        );
-        assert!(!manifest.verify(&public_key, "0.1.0").unwrap());
-        assert!(manifest.verify_channel(&public_key, "0.1.0", true).unwrap());
-        assert!(manifest.verify(&public_key, "0.2.0-beta.1").unwrap());
+        assert_eq!(read_capped(&mut &payload[..], 1024).unwrap(), payload);
+        assert!(read_capped(&mut &payload[..], 3).is_err());
+        assert!(read_capped(&mut &b""[..], 1024).is_err());
     }
 }

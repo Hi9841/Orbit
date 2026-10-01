@@ -10,7 +10,7 @@ fn main() {
     });
     println!("cargo:rustc-env=ORBIT_DEVELOPMENT_RELEASES_URL={development_feed}");
     let manifest = std::env::var("ORBIT_UPDATE_MANIFEST_URL").unwrap_or_else(|_| {
-        "https://github.com/Hi9841/Orbit/releases/latest/download/update.json".into()
+        "https://github.com/Hi9841/Orbit/releases/latest/download/latest.json".into()
     });
     let public_key = std::env::var("ORBIT_UPDATE_PUBLIC_KEY").unwrap_or_else(|_| {
         std::fs::read_to_string("packaging/update-public-key.txt")
