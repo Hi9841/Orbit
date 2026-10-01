@@ -1544,18 +1544,26 @@ fn covered_windows(placed: HWND, frame: Rect, monitor: HMONITOR, settings: &Sett
         .collect()
 }
 
-fn move_displaced(window: HWND, frame: Rect, settings: &Settings) -> Result<(), String> {
-    if unsafe { IsZoomed(window).as_bool() } {
-        unsafe {
-            let _ = ShowWindow(window, SW_RESTORE);
-        }
-    }
-    let old = rect_from_window(window)?;
-    if settings.animate_window_resizes
-        && start_window_animation(window, old, frame, settings, AnimationCompletion::None)?
-    {
-        return Ok(());
-    }
+fn move_displaced(window: HWND, frame: Rect, _settings: &Settings) -> Result<(), String> {
+    // A maximized window ignores SetWindowPos. ShowWindow(SW_RESTORE) then
+    // SetWindowPos races and the window returns to its old normal rect.
+    // One placement call clears maximized and sets the tile.
+    let margins = read_frame_margins(window);
+    let outer = outer_for(frame, margins);
+    let placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        flags: windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT_FLAGS(0),
+        showCmd: SW_SHOWNORMAL.0 as u32,
+        ptMinPosition: POINT { x: -1, y: -1 },
+        ptMaxPosition: POINT { x: -1, y: -1 },
+        rcNormalPosition: RECT {
+            left: outer.left,
+            top: outer.top,
+            right: outer.right,
+            bottom: outer.bottom,
+        },
+    };
+    unsafe { SetWindowPlacement(window, &placement) }.map_err(|error| error.to_string())?;
     set_visible_frame(window, frame, Default::default())
 }
 
@@ -4115,16 +4123,12 @@ fn start_update_check(host: HWND, manual: bool) -> Result<(), String> {
     let address = host.0 as usize;
     std::thread::spawn(move || {
         let host = HWND(address as *mut _);
-        let current = update::current_version();
         match update::report() {
             update::UpdateReport::Available {
                 version,
                 manifest: Some(manifest),
             } => {
-                post_version_line(
-                    host,
-                    &format!("Version {current}. {version} is ready to install."),
-                );
+                post_version_line(host, &format!("{version} is ready to install."));
                 if let Ok(mut slot) = AVAILABLE_UPDATE.lock() {
                     *slot = Some(manifest);
                 }
@@ -4143,15 +4147,15 @@ fn start_update_check(host: HWND, manual: bool) -> Result<(), String> {
             } => post_version_line(
                 host,
                 &format!(
-                    "Version {current}. {version} is published, but it has no signed updater file."
+                    "{version} is published. Install it from the release page. A signed update file is not attached yet."
                 ),
             ),
             update::UpdateReport::UpToDate => {
-                post_version_line(host, &format!("Version {current}. You're on the latest."))
+                post_version_line(host, "You're on the latest version.")
             }
             update::UpdateReport::Failed(error) => {
                 if manual {
-                    post_version_line(host, &format!("Version {current}. Couldn't check: {error}"));
+                    post_version_line(host, &format!("Couldn't check for updates. {error}"));
                 } else {
                     eprintln!("Orbit update check: {error}");
                 }
@@ -5235,6 +5239,67 @@ mod tests {
         assert_eq!(actual.right, work.left + (work.right - work.left) / 2);
         assert_eq!(actual.top, work.top);
         assert_eq!(actual.bottom, work.bottom);
+    }
+
+    #[test]
+    fn maximized_window_lands_on_the_opposite_tile() {
+        let window = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("Orbit displace proof"),
+                WS_OVERLAPPED
+                    | WS_CAPTION
+                    | WS_THICKFRAME
+                    | windows::Win32::UI::WindowsAndMessaging::WS_VISIBLE,
+                40,
+                40,
+                280,
+                180,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        unsafe {
+            let _ = ShowWindow(window, SW_MAXIMIZE);
+        }
+        let before = rect_from_window(window).unwrap();
+        assert!(
+            before.width() > 400 && before.height() > 300,
+            "the proof window did not maximize: {before:?}"
+        );
+        let target = Rect {
+            left: before.left + before.width() / 2,
+            top: before.top,
+            right: before.right,
+            bottom: before.bottom,
+        };
+        move_displaced(window, target, &Settings::default()).unwrap();
+        let landed = rect_from_window(window).unwrap();
+        let still_zoomed = unsafe { IsZoomed(window).as_bool() };
+        unsafe {
+            let _ = DestroyWindow(window);
+        }
+        assert!(
+            (landed.left - target.left).abs() <= 16,
+            "left {} wanted {}",
+            landed.left,
+            target.left
+        );
+        assert!(
+            (landed.right - target.right).abs() <= 16,
+            "right {} wanted {}",
+            landed.right,
+            target.right
+        );
+        assert!(
+            (landed.top - target.top).abs() <= 16 && (landed.bottom - target.bottom).abs() <= 16,
+            "vertical {landed:?} wanted {target:?}"
+        );
+        assert!(!still_zoomed, "window stayed maximized at {landed:?}");
     }
 
     #[test]

@@ -1027,7 +1027,13 @@ fn create_shell(hwnd: HWND) -> Result<(), String> {
         WINDOW_STYLE(0),
         PAGE_DESCRIPTION,
     )?;
-    child(hwnd, w!("STATIC"), w!(""), WINDOW_STYLE(0), STATUS)?;
+    child(
+        hwnd,
+        w!("STATIC"),
+        w!(""),
+        WINDOW_STYLE(0x0000_4000),
+        STATUS,
+    )?;
     for (id, label) in [
         (SAVE, "Save"),
         (CANCEL, "Cancel"),
@@ -2420,12 +2426,8 @@ fn build_exclusions(hwnd: HWND, settings: &Settings) -> Result<(), String> {
 }
 
 fn build_about(hwnd: HWND) -> Result<(), String> {
-    create_group(hwnd, 1760, "Version")?;
-    create_text(
-        hwnd,
-        1761,
-        &format!("Version {}", env!("CARGO_PKG_VERSION")),
-    )?;
+    create_group(hwnd, 1760, "Updates")?;
+    create_text(hwnd, 1761, "")?;
     create_text(hwnd, 1762, "")?;
     create_button(hwnd, ABOUT_UPDATE, "Check for updates")?;
     let remembered = orbit::update::remembered_status();
@@ -2447,7 +2449,7 @@ pub fn set_update_status(text: &str) {
         return;
     };
     set_control_text(hwnd, ABOUT_STATUS, text);
-    set_status(hwnd, text);
+    set_status(hwnd, "");
 }
 
 fn layout_window(hwnd: HWND) {
@@ -2458,12 +2460,18 @@ fn layout_window(hwnd: HWND) {
     raise_shell(hwnd);
     move_control(hwnd, PAGE_TITLE, 256, 24, width - 296, 32);
     move_control(hwnd, PAGE_DESCRIPTION, 256, 58, width - 296, 22);
-    move_control(hwnd, STATUS, 256, height - 52, (width - 680).max(80), 22);
-    move_control(hwnd, SAVE, width - 148, height - 60, 116, 40);
-    move_control(hwnd, CANCEL, width - 264, height - 60, 108, 40);
-    move_control(hwnd, EXPORT, width - 380, height - 60, 108, 40);
-    move_control(hwnd, IMPORT, width - 496, height - 60, 108, 40);
-    move_control(hwnd, RESET, 16, height - 60, 108, 40);
+    let button_y = height - 56;
+    let save_x = width - 128;
+    let cancel_x = save_x - 100;
+    let export_x = cancel_x - 100;
+    let import_x = export_x - 100;
+    move_control(hwnd, SAVE, save_x, button_y, 96, 40);
+    move_control(hwnd, CANCEL, cancel_x, button_y, 92, 40);
+    move_control(hwnd, EXPORT, export_x, button_y, 92, 40);
+    move_control(hwnd, IMPORT, import_x, button_y, 92, 40);
+    move_control(hwnd, RESET, 16, button_y, 88, 40);
+    let status_width = (import_x - 248 - 16).max(40);
+    move_control(hwnd, STATUS, 248, button_y + 10, status_width, 20);
 }
 
 struct Column {
@@ -2886,18 +2894,12 @@ fn layout_page(hwnd: HWND, page: usize) {
         }
         7 => {
             column.heading(1760);
-            column.line(1761, 24);
-            move_control(hwnd, ABOUT_UPDATE, column.x, column.y, 168, 40);
-            move_control(
-                hwnd,
-                ABOUT_STATUS,
-                column.x + 180,
-                column.y + 8,
-                column.width - 180,
-                24,
-            );
+            move_control(hwnd, 1761, 0, -40, 1, 1);
+            move_control(hwnd, ABOUT_UPDATE, column.x, column.y, 180, 40);
+            column.y += 52;
+            move_control(hwnd, ABOUT_STATUS, column.x, column.y, column.width, 48);
             column.y += 56;
-            column.line(1762, 20);
+            move_control(hwnd, 1762, 0, -40, 1, 1);
             column.end()
         }
         _ => column.end(),
