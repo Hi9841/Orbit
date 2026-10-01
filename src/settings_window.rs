@@ -1007,7 +1007,7 @@ fn set_scroll_offset(hwnd: HWND, requested: i32) {
 }
 
 fn create_shell(hwnd: HWND) -> Result<(), String> {
-    create_text(hwnd, BRAND, "Orbit")?;
+    create_text(hwnd, BRAND, &format!("Orbit {}", env!("CARGO_PKG_VERSION")))?;
     create_text(hwnd, SIDEBAR_LABEL, "")?;
     child(
         hwnd,
@@ -2418,29 +2418,34 @@ fn build_exclusions(hwnd: HWND, settings: &Settings) -> Result<(), String> {
 }
 
 fn build_about(hwnd: HWND) -> Result<(), String> {
-    create_group(hwnd, 1760, "Orbit")?;
+    create_group(hwnd, 1760, "Version")?;
     create_text(
         hwnd,
         1761,
-        "Orbit is a native Windows window manager inspired by Loop.",
+        &format!("Version {}", env!("CARGO_PKG_VERSION")),
     )?;
-    create_text(
-        hwnd,
-        1762,
-        "Orbit is licensed under GPL-3.0-only. Copyright holders and source attribution are in the included LICENSE and NOTICE files.",
-    )?;
+    create_text(hwnd, 1762, "")?;
     create_button(hwnd, ABOUT_UPDATE, "Check for updates")?;
+    let remembered = orbit::update::remembered_status();
     create_text(
         hwnd,
         ABOUT_STATUS,
-        "Manual update checks run in the resident Orbit process.",
+        if remembered.is_empty() {
+            "Not checked yet."
+        } else {
+            &remembered
+        },
     )?;
-    create_text(
-        hwnd,
-        1763,
-        "Settings are stored in your local application data folder. Use Import and Export below to move a settings file.",
-    )?;
+    create_text(hwnd, 1763, "")?;
     Ok(())
+}
+
+pub fn set_update_status(text: &str) {
+    let Some(hwnd) = WINDOW.with(Cell::get) else {
+        return;
+    };
+    set_control_text(hwnd, ABOUT_STATUS, text);
+    set_status(hwnd, text);
 }
 
 fn layout_window(hwnd: HWND) {
@@ -3362,12 +3367,8 @@ fn export_settings(hwnd: HWND) {
 fn check_for_updates(hwnd: HWND) {
     match platform::check_for_updates() {
         Ok(()) => {
-            set_control_text(
-                hwnd,
-                ABOUT_STATUS,
-                "Update check started. Orbit will notify you if an update is available.",
-            );
-            set_status(hwnd, "Update check started.");
+            set_control_text(hwnd, ABOUT_STATUS, "Checking…");
+            set_status(hwnd, "Checking for updates.");
         }
         Err(error) => {
             set_control_text(

@@ -128,6 +128,8 @@ const RELOAD_SETTINGS_MESSAGE: u32 = WM_APP + 6;
 const DRAG_EVENT_MESSAGE: u32 = WM_APP + 7;
 const WHEEL_EVENT_MESSAGE: u32 = WM_APP + 8;
 const TRIGGER_EVAL_MESSAGE: u32 = WM_APP + 9;
+const UPDATE_STATUS_MESSAGE: u32 = WM_APP + 10;
+const RADIAL_BIND_MESSAGE: u32 = WM_APP + 11;
 const IPC_MAGIC: usize = 0x4f52_4254;
 const IPC_TIMEOUT_MS: u32 = 5000;
 const MAX_IPC_BYTES: usize = 4096;
@@ -223,6 +225,7 @@ struct Session {
     radial_bitmap: Option<PresentedBitmap>,
     radial_stamp: Option<crate::radial::RadialStamp>,
     radial_stamp_key: Option<RadialCacheKey>,
+    radial_idle: Option<PresentedBitmap>,
     radial_angle: Option<f64>,
     painted_radial_bucket: Option<i16>,
     preview_sector_since: Option<Instant>,
@@ -450,10 +453,12 @@ fn ensure_radial_stamp(settings: &Settings, dpi: u32) -> bool {
     let Ok(stamp) = crate::radial::build_stamp(settings, dpi) else {
         return false;
     };
+    let idle = PresentedBitmap::from_premultiplied(stamp.size, stamp.size, &stamp.idle);
     SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
         session.radial_stamp_key = Some(key);
         session.radial_stamp = Some(stamp);
+        session.radial_idle = Some(idle);
         session.painted_radial_bucket = None;
     });
     true
@@ -2185,12 +2190,6 @@ fn double_tap_interval() -> std::time::Duration {
 fn start_trigger(host: HWND, kind: TriggerKind, settings: &Settings) {
     let delay = if kind == TriggerKind::MiddleMouse && !settings.middle_click_uses_delay {
         0
-    } else if kind == TriggerKind::Keyboard
-        && settings.trigger.key == 0
-        && settings.trigger_delay_ms == 0
-    {
-        // Leave one tick so Ctrl+Alt plus a shortcut key can cancel before the ring opens.
-        16
     } else {
         settings.trigger_delay_ms
     };
@@ -2313,7 +2312,9 @@ fn begin_radial(host: HWND, kind: TriggerKind) {
         session.overlay
     });
     if let Some(overlay) = overlay {
-        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(target) }.max(96);
+        // Use the already-warm system DPI. Asking the target window for DPI
+        // can stall on that process before the ring is visible.
+        let dpi = system_dpi();
         let size = crate::radial::window_size_px(&settings, dpi);
         let show_ring = settings.radial_menu_visible && !settings.hide_on_no_selection;
         let _ = unsafe {
@@ -2324,20 +2325,50 @@ fn begin_radial(host: HWND, kind: TriggerKind) {
                 origin.1 - size / 2,
                 size,
                 size,
-                SWP_NOACTIVATE,
+                SWP_NOACTIVATE | SWP_NOREDRAW,
             )
         };
         if show_ring {
             unsafe {
                 let _ = ShowWindow(overlay, SW_SHOWNOACTIVATE);
             }
-            redraw_radial(host);
+            show_cached_radial(overlay);
         }
         unsafe {
             let _ = SetTimer(Some(host), TIMER_ID, 8, None);
         }
     }
     hold_smooth_timer();
+    // Target checks and placement capture can block. Do them after this
+    // function returns so the ring is presented first.
+    let _ = unsafe { PostMessageW(Some(host), RADIAL_BIND_MESSAGE, WPARAM(0), LPARAM(0)) };
+}
+
+fn show_cached_radial(overlay: HWND) {
+    let cached = SESSION.with(|cell| cell.borrow().radial_idle.clone());
+    let Some(bitmap) = cached else {
+        redraw_radial(overlay);
+        return;
+    };
+    SESSION.with(|cell| cell.borrow_mut().radial_bitmap = Some(bitmap));
+    unsafe {
+        let _ = InvalidateRect(Some(overlay), None, false);
+        let _ = UpdateWindow(overlay);
+    }
+}
+
+fn bind_open_radial(host: HWND) {
+    let (open, target, settings) = SESSION.with(|cell| {
+        let session = cell.borrow();
+        (session.open, session.target, session.settings.clone())
+    });
+    if !open {
+        return;
+    }
+    let Some(target) = target else {
+        finish_session(host, false);
+        return;
+    };
     if let Err(error) = ensure_target(target, &settings) {
         finish_session(host, false);
         notify_error(host, &error);
@@ -2346,6 +2377,11 @@ fn begin_radial(host: HWND, kind: TriggerKind) {
     if let Err(error) = with_history(|history| history.capture_initial(target)) {
         finish_session(host, false);
         notify_error(host, &error);
+        return;
+    }
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(target) }.max(96);
+    if dpi != system_dpi() {
+        redraw_radial(host);
     }
 }
 
@@ -2512,6 +2548,7 @@ pub fn run() -> Result<(), String> {
             SetTimer(Some(host), UPDATE_TIMER_ID, 6 * 60 * 60 * 1000, None);
         }
     }
+    hold_smooth_timer();
     let mut msg = MSG::default();
     loop {
         let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -2519,6 +2556,7 @@ pub fn run() -> Result<(), String> {
             break;
         }
         if result.0 == -1 {
+            release_smooth_timer();
             return Err(format!(
                 "message loop failed: {}",
                 windows::core::Error::from_thread()
@@ -2532,6 +2570,7 @@ pub fn run() -> Result<(), String> {
             DispatchMessageW(&msg);
         }
     }
+    release_smooth_timer();
     unregister_hotkeys(host);
     let _ = unsafe { KillTimer(Some(host), UPDATE_TIMER_ID) };
     HOOK_HOST.store(0, Ordering::Relaxed);
@@ -2989,6 +3028,13 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        UPDATE_STATUS_MESSAGE => {
+            let text = update::remembered_status();
+            if !text.is_empty() {
+                settings_window::set_update_status(&text);
+            }
+            LRESULT(0)
+        }
         UPDATE_FAILED_MESSAGE => {
             if let Some(error) = UPDATE_ERROR.lock().ok().and_then(|mut slot| slot.take()) {
                 if wparam.0 == 1 {
@@ -3005,6 +3051,10 @@ unsafe extern "system" fn window_proc(
                     notify_error(hwnd, &error);
                 }
             }
+            LRESULT(0)
+        }
+        RADIAL_BIND_MESSAGE => {
+            bind_open_radial(hwnd);
             LRESULT(0)
         }
         OPEN_SETTINGS_MESSAGE => {
@@ -3380,6 +3430,18 @@ fn redraw_radial(_host: HWND) {
             }
         }
         if !ensure_radial_stamp(&settings, dpi) {
+            return;
+        }
+        if angle.is_none()
+            && let Some(idle) = SESSION.with(|cell| cell.borrow().radial_idle.clone())
+            && idle.width == expected
+            && idle.height == expected
+        {
+            SESSION.with(|cell| cell.borrow_mut().radial_bitmap = Some(idle));
+            unsafe {
+                let _ = InvalidateRect(Some(overlay), None, false);
+                let _ = UpdateWindow(overlay);
+            }
             return;
         }
         let pixels = SESSION.with(|cell| {
@@ -3795,6 +3857,19 @@ fn evaluate_modifier_trigger(hwnd: HWND, vk: u32, down: bool) {
         (session.open, session.trigger_pending)
     });
     let extra_key = down && !is_trigger_modifier(vk);
+    if extra_key && open {
+        let cancel_chord = SESSION.with(|cell| {
+            let session = cell.borrow();
+            session.selected.is_none()
+                && session
+                    .trigger_started
+                    .is_some_and(|started| started.elapsed().as_millis() < 120)
+        });
+        if cancel_chord {
+            finish_session(hwnd, false);
+        }
+        return;
+    }
     if extra_key && pending && !open {
         SESSION.with(|cell| {
             let mut session = cell.borrow_mut();
@@ -3902,7 +3977,7 @@ fn tray_data(host: HWND, icon: HICON) -> NOTIFYICONDATAW {
         hIcon: icon,
         ..Default::default()
     };
-    let tip: Vec<u16> = "Orbit window manager"
+    let tip: Vec<u16> = format!("Orbit {}", env!("CARGO_PKG_VERSION"))
         .encode_utf16()
         .chain(Some(0))
         .collect();
@@ -3959,12 +4034,20 @@ fn start_update_check(host: HWND, manual: bool) -> Result<(), String> {
     }
     let address = host.0 as usize;
     std::thread::spawn(move || {
-        match update::check() {
-            Ok(Some(manifest)) => {
+        let host = HWND(address as *mut _);
+        let current = update::current_version();
+        match update::report() {
+            update::UpdateReport::Available {
+                version,
+                manifest: Some(manifest),
+            } => {
+                post_version_line(
+                    host,
+                    &format!("Version {current}. {version} is ready to install."),
+                );
                 if let Ok(mut slot) = AVAILABLE_UPDATE.lock() {
                     *slot = Some(manifest);
                 }
-                let host = HWND(address as *mut _);
                 UPDATE_PROMPT_PENDING.store(true, Ordering::Release);
                 if unsafe {
                     PostMessageW(Some(host), UPDATE_AVAILABLE_MESSAGE, WPARAM(0), LPARAM(0))
@@ -3974,22 +4057,25 @@ fn start_update_check(host: HWND, manual: bool) -> Result<(), String> {
                     UPDATE_PROMPT_PENDING.store(false, Ordering::Release);
                 }
             }
-            Ok(None) if manual => {
-                if let Ok(mut slot) = UPDATE_ERROR.lock() {
-                    *slot = Some("No newer stable release is available".into());
-                }
-                let _ = unsafe {
-                    PostMessageW(
-                        Some(HWND(address as *mut _)),
-                        UPDATE_FAILED_MESSAGE,
-                        WPARAM(1),
-                        LPARAM(0),
-                    )
-                };
+            update::UpdateReport::Available {
+                version,
+                manifest: None,
+            } => post_version_line(
+                host,
+                &format!(
+                    "Version {current}. {version} is published, but it has no signed updater file."
+                ),
+            ),
+            update::UpdateReport::UpToDate => {
+                post_version_line(host, &format!("Version {current}. You're on the latest."))
             }
-            Ok(None) => {}
-            Err(error) if manual => post_update_status(HWND(address as *mut _), error),
-            Err(error) => eprintln!("Orbit update check: {error}"),
+            update::UpdateReport::Failed(error) => {
+                if manual {
+                    post_version_line(host, &format!("Version {current}. Couldn't check: {error}"));
+                } else {
+                    eprintln!("Orbit update check: {error}");
+                }
+            }
         }
         UPDATE_CHECKING.store(false, Ordering::Release);
     });
@@ -4020,6 +4106,11 @@ fn start_update_download(host: HWND, manifest: Manifest) {
             }
         }
     });
+}
+
+fn post_version_line(host: HWND, message: &str) {
+    update::remember_status(message);
+    let _ = unsafe { PostMessageW(Some(host), UPDATE_STATUS_MESSAGE, WPARAM(0), LPARAM(0)) };
 }
 
 fn post_update_status(host: HWND, message: String) {
@@ -4092,13 +4183,10 @@ fn show_tray_menu(hwnd: HWND) {
                 }
             }
             1 => {
-                let about: Vec<u16> = format!(
-                    "Orbit {}\nGPL-3.0-only\nAdapted from Loop by Kai Azim and contributors.",
-                    env!("CARGO_PKG_VERSION")
-                )
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
+                let about: Vec<u16> = format!("Orbit {}", env!("CARGO_PKG_VERSION"))
+                    .encode_utf16()
+                    .chain(Some(0))
+                    .collect();
                 unsafe {
                     MessageBoxW(Some(hwnd), PCWSTR(about.as_ptr()), w!("About Orbit"), MB_OK);
                 }
@@ -4130,6 +4218,7 @@ pub fn reload_settings() -> Result<(), String> {
         session.preview_bitmap_cache = None;
         session.radial_stamp = None;
         session.radial_stamp_key = None;
+        session.radial_idle = None;
         session.painted_radial_bucket = None;
     });
     unregister_hotkeys(host);

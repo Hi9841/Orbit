@@ -113,6 +113,109 @@ fn client() -> ureq::Agent {
         .build()
 }
 
+pub fn version_is_newer(offered: &str, current: &str) -> Result<bool, String> {
+    let offered = offered.trim().trim_start_matches('v');
+    let current = current.trim().trim_start_matches('v');
+    let offered = Version::parse(offered).map_err(|_| "invalid update version".to_string())?;
+    let current = Version::parse(current).map_err(|_| "invalid current version".to_string())?;
+    Ok(offered > current)
+}
+
+#[derive(Clone, Debug)]
+pub enum UpdateReport {
+    UpToDate,
+    Available {
+        version: String,
+        manifest: Option<Manifest>,
+    },
+    Failed(String),
+}
+
+pub fn current_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+static LAST_LINE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn remember_status(text: &str) {
+    if let Ok(mut slot) = LAST_LINE.lock() {
+        *slot = text.to_string();
+    }
+}
+
+pub fn remembered_status() -> String {
+    LAST_LINE
+        .lock()
+        .map(|slot| slot.clone())
+        .unwrap_or_default()
+}
+
+pub fn report() -> UpdateReport {
+    let current = current_version();
+    let latest = match latest_stable_version() {
+        Ok(version) => version,
+        Err(error) => return UpdateReport::Failed(error),
+    };
+    let newer = match version_is_newer(&latest, current) {
+        Ok(newer) => newer,
+        Err(error) => return UpdateReport::Failed(error),
+    };
+    if !newer {
+        return UpdateReport::UpToDate;
+    }
+    let manifest = configured().and_then(|(url_key, key)| {
+        let _ = url_key;
+        let asset =
+            format!("https://github.com/Hi9841/Orbit/releases/download/v{latest}/update.json");
+        fetch_manifest(&asset, key, true).ok().flatten()
+    });
+    UpdateReport::Available {
+        version: latest,
+        manifest,
+    }
+}
+
+fn latest_stable_version() -> Result<String, String> {
+    let url = latest_release_api();
+    validate_url(&url)?;
+    #[derive(Deserialize)]
+    struct Latest {
+        tag_name: String,
+        draft: bool,
+        prerelease: bool,
+    }
+    let response = client()
+        .get(&url)
+        .set("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(20))
+        .call()
+        .map_err(|error| format!("update check failed: {error}"))?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(256 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read release: {error}"))?;
+    let latest: Latest =
+        serde_json::from_slice(&bytes).map_err(|error| format!("invalid release: {error}"))?;
+    if latest.draft || latest.prerelease {
+        return Err("latest GitHub release is not a stable version".into());
+    }
+    let version = latest.tag_name.trim().trim_start_matches('v').to_string();
+    Version::parse(&version).map_err(|_| "invalid update version".to_string())?;
+    Ok(version)
+}
+
+fn latest_release_api() -> String {
+    let feed = option_env!("ORBIT_DEVELOPMENT_RELEASES_URL").unwrap_or("");
+    if let Some(base) = feed.split('?').next()
+        && let Some(prefix) = base.strip_suffix("/releases")
+    {
+        return format!("{prefix}/releases/latest");
+    }
+    "https://api.github.com/repos/Hi9841/Orbit/releases/latest".into()
+}
+
 pub fn check() -> Result<Option<Manifest>, String> {
     let include_development = crate::settings::Settings::load()?.include_development_versions;
     check_channel(include_development)
@@ -311,6 +414,14 @@ mod tests {
         };
         manifest.signature = STANDARD.encode(key.sign(&manifest.signed_payload()).to_bytes());
         (manifest, STANDARD.encode(key.verifying_key().to_bytes()))
+    }
+
+    #[test]
+    fn version_comparison_ignores_a_leading_v_and_rejects_junk() {
+        assert!(version_is_newer("0.2.5", "0.2.4").unwrap());
+        assert!(!version_is_newer("v0.2.4", "0.2.4").unwrap());
+        assert!(version_is_newer("v1.0.0", "v0.9.9").unwrap());
+        assert!(version_is_newer("nope", "0.2.4").is_err());
     }
 
     #[test]
