@@ -46,7 +46,7 @@ By default, the application checks `https://github.com/Hi9841/Orbit/releases/lat
 
 With "Include development versions" enabled, Orbit reads the repository's release listing and verifies signed `update.json` assets before choosing the newest offered version. The release listing itself cannot authorize an installer. Every accepted manifest must pass the same embedded-key signature check.
 
-The updater checks in the background, asks before downloading and installing, verifies the manifest and installer, and launches the normal installer. The installer closes the previous resident instance and restarts Orbit for `/UPDATE=1` upgrades.
+The updater checks in the background, asks before downloading and installing, and verifies the manifest and installer. It then opens the installer with a progress window only (`/SILENT /SUPPRESSMSGBOXES /NORESTART /SP- /UPDATE=1`) and exits so the executable can be replaced. The installer restarts the resident and leaves settings in place. A manual install still uses the full setup wizard.
 
 ## Forks
 

@@ -378,6 +378,16 @@ fn copy_verified(
     Ok(())
 }
 
+/// Inno arguments for an in-place update.
+///
+/// This matches Prism's Windows updater: a progress window and no wizard
+/// (`/SILENT`, the Inno equivalent of NSIS `/P`), no extra prompts, no reboot,
+/// and `/UPDATE=1` so setup restarts the resident and keeps settings.
+/// The running app must exit after launching setup so Windows can replace it.
+pub fn passive_installer_args() -> &'static str {
+    "/SILENT /SUPPRESSMSGBOXES /NORESTART /SP- /UPDATE=1"
+}
+
 /// Recheck the exact staged file immediately before handing it to Windows.
 pub fn verify_download(path: &Path, manifest: &Manifest) -> Result<(), String> {
     let (_, key) = configured().ok_or("updates are not configured")?;
@@ -414,6 +424,17 @@ mod tests {
         };
         manifest.signature = STANDARD.encode(key.sign(&manifest.signed_payload()).to_bytes());
         (manifest, STANDARD.encode(key.verifying_key().to_bytes()))
+    }
+
+    #[test]
+    fn passive_update_uses_progress_only_and_restarts() {
+        let args = passive_installer_args();
+        assert!(args.contains("/SILENT"));
+        assert!(args.contains("/SUPPRESSMSGBOXES"));
+        assert!(args.contains("/NORESTART"));
+        assert!(args.contains("/SP-"));
+        assert!(args.contains("/UPDATE=1"));
+        assert!(!args.contains("/VERYSILENT"));
     }
 
     #[test]

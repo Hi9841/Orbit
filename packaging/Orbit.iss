@@ -40,7 +40,7 @@ Root: HKCU; Subkey: "Software\Classes\orbit"; ValueType: string; ValueData: "URL
 Root: HKCU; Subkey: "Software\Classes\orbit"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\orbit\DefaultIcon"; ValueType: string; ValueData: "{app}\orbit.exe,0"
 Root: HKCU; Subkey: "Software\Classes\orbit\shell\open\command"; ValueType: string; ValueData: """{app}\orbit.exe"" ""%1"""
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Orbit"; ValueData: """{app}\orbit.exe"" --resident"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Orbit"; ValueData: """{app}\orbit.exe"" --resident"; Flags: uninsdeletevalue; Check: RunEntryMissing
 
 [Icons]
 Name: "{group}\Orbit"; Filename: "{app}\orbit.exe"
@@ -56,6 +56,14 @@ var
 function IsUpdate(): Boolean;
 begin
   Result := ExpandConstant('{param:UPDATE|0}') = '1';
+end;
+
+function RunEntryMissing(): Boolean;
+var
+  Existing: String;
+begin
+  { Rewriting this value on an update re-enables a startup entry the user disabled. }
+  Result := (not RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Orbit', Existing)) or (Existing = '');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

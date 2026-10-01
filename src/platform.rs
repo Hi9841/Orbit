@@ -22,12 +22,13 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetColorizationColor, DwmGetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, COLORONCOLOR, CreateDCW, CreatePen,
-    CreateSolidBrush, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, EnumDisplayMonitors,
-    FillRect, GetDeviceCaps, GetMonitorInfoW, HGDIOBJ, HMONITOR, HORZSIZE, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
-    PAINTSTRUCT, PS_SOLID, RoundRect, SRCCOPY, SelectObject, SetDIBitsToDevice, SetStretchBltMode,
-    StretchDIBits, UpdateWindow, VERTSIZE,
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint,
+    COLORONCOLOR, CreateCompatibleDC, CreateDCW, CreateDIBSection, CreatePen, CreateSolidBrush,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, EnumDisplayMonitors, FillRect, GetDeviceCaps,
+    GetMonitorInfoW, HGDIOBJ, HMONITOR, HORZSIZE, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT, PS_SOLID,
+    RoundRect, SRCCOPY, SelectObject, SetDIBitsToDevice, SetStretchBltMode, StretchDIBits,
+    UpdateWindow, VERTSIZE,
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -44,7 +45,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_ERROR, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -56,16 +57,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT, KillTimer, LoadCursorW, LoadIconW,
     MB_ICONINFORMATION, MB_OK, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG, MSLLHOOKSTRUCT, MessageBoxW,
     PostMessageW, PostQuitMessage, RegisterClassW, RemovePropW, SHOW_WINDOW_CMD, SMTO_ABORTIFHUNG,
-    SMTO_BLOCK, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SendMessageTimeoutW, SetForegroundWindow, SetLayeredWindowAttributes, SetPropW, SetTimer,
-    SetWindowPlacement, SetWindowPos, SetWindowsHookExW, ShowWindow, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WINDOWPLACEMENT, WM_APP, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
-    WNDCLASSW, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_OVERLAPPED, WS_POPUP, WS_THICKFRAME, WindowFromPoint,
+    SMTO_BLOCK, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+    SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SendMessageTimeoutW, SetForegroundWindow, SetLayeredWindowAttributes, SetPropW,
+    SetTimer, SetWindowPlacement, SetWindowPos, SetWindowsHookExW, ShowWindow, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, ULW_ALPHA, UnhookWindowsHookEx,
+    UpdateLayeredWindow, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOWPLACEMENT, WM_APP, WM_CLOSE,
+    WM_COPYDATA, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP, WS_THICKFRAME,
+    WindowFromPoint,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     LWA_ALPHA, LWA_COLORKEY, SPI_GETCLIENTAREAANIMATION, SPI_GETUIEFFECTS,
@@ -136,13 +138,12 @@ const MAX_IPC_BYTES: usize = 4096;
 const RECOVERY_PROPERTY: windows::core::PCWSTR = w!("Orbit.Recovery.6C96F66A");
 // COLORREF stores red in the low byte; a 32-bit BI_RGB pixel stores it in the high color byte.
 const TRANSPARENT_COLOR_KEY: COLORREF = COLORREF(0x0003_0201);
+#[allow(dead_code)]
 const TRANSPARENT_DIB_PIXEL: u32 = 0x0001_0203;
-const RADIAL_WINDOW_OPACITY: u8 = 196;
-
-// Layered popups stay on the color-key path (WM_PAINT + SetDIBitsToDevice).
-// Measured on this machine (DPI 96): UpdateLayeredWindow per-pixel alpha left a
-// monitor-sized window "visible" while GetPixel read the window underneath, and
-// a 180x120 magenta probe found no 0x00ff00ff pixels. A color-key probe passed.
+// The preview stays on the color-key path. The radial does not: a color key
+// cuts every pixel below half coverage, so the circle edge turns into ridges.
+// GetPixel cannot read a per-pixel alpha layered window, so that probe does
+// not show whether UpdateLayeredWindow worked.
 // Do not call UpdateLayeredWindow after SetLayeredWindowAttributes: the combo
 // disables per-pixel alpha until the layered style is reset.
 fn enable_color_key(window: HWND, opacity: u8) -> Result<(), String> {
@@ -343,11 +344,20 @@ struct PresentedBitmap {
 }
 
 impl PresentedBitmap {
+    #[allow(dead_code)]
     fn from_premultiplied(width: i32, height: i32, pixels: &[u32]) -> Self {
         Self {
             width,
             height,
             pixels: pixels.iter().copied().map(color_key_pixel).collect(),
+        }
+    }
+
+    fn from_alpha(width: i32, height: i32, pixels: &[u32]) -> Self {
+        Self {
+            width,
+            height,
+            pixels: pixels.iter().copied().collect(),
         }
     }
 }
@@ -453,7 +463,7 @@ fn ensure_radial_stamp(settings: &Settings, dpi: u32) -> bool {
     let Ok(stamp) = crate::radial::build_stamp(settings, dpi) else {
         return false;
     };
-    let idle = PresentedBitmap::from_premultiplied(stamp.size, stamp.size, &stamp.idle);
+    let idle = PresentedBitmap::from_alpha(stamp.size, stamp.size, &stamp.idle);
     SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
         session.radial_stamp_key = Some(key);
@@ -2480,7 +2490,6 @@ pub fn run() -> Result<(), String> {
     }
     .map_err(|e| e.to_string())?;
     enable_color_key(preview, settings.preview_opacity)?;
-    enable_color_key(overlay, RADIAL_WINDOW_OPACITY)?;
     SESSION.with(|cell| {
         let mut session = cell.borrow_mut();
         session.overlay = Some(overlay);
@@ -3008,25 +3017,16 @@ unsafe extern "system" fn window_proc(
                     UPDATE_DOWNLOADING.store(false, Ordering::Release);
                     return LRESULT(0);
                 }
-                use std::os::windows::process::CommandExt;
-                match std::process::Command::new(&path)
-                    .arg("/UPDATE=1")
-                    .creation_flags(0x08000000)
-                    .spawn()
-                {
-                    Ok(mut child) => {
-                        // The installer closes Orbit only after the user proceeds.
-                        // Canceling its welcome page leaves window management running.
-                        std::thread::spawn(move || {
-                            let _ = child.wait();
-                            UPDATE_DOWNLOADING.store(false, Ordering::Release);
-                        });
+                let _ = set_tray_icon(hwnd, false);
+                match launch_passive_installer(&path) {
+                    Ok(()) => {
+                        // Setup replaces this executable. Exit now, the same way
+                        // Prism leaves before its passive installer runs.
+                        std::process::exit(0);
                     }
                     Err(error) => {
-                        notify_error(
-                            hwnd,
-                            &format!("Cannot launch the update installer: {error}"),
-                        );
+                        let _ = set_tray_icon(hwnd, true);
+                        notify_error(hwnd, &error);
                         UPDATE_DOWNLOADING.store(false, Ordering::Release);
                     }
                 }
@@ -3458,7 +3458,7 @@ fn redraw_radial(_host: HWND) {
         let Some(pixels) = pixels else {
             return;
         };
-        let presented = PresentedBitmap::from_premultiplied(expected, expected, &pixels);
+        let presented = PresentedBitmap::from_alpha(expected, expected, &pixels);
         SESSION.with(|cell| cell.borrow_mut().radial_bitmap = Some(presented));
         unsafe {
             let _ = InvalidateRect(Some(overlay), None, false);
@@ -4087,6 +4087,37 @@ fn start_update_check(host: HWND, manual: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn launch_passive_installer(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    let file: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let parameters: Vec<u16> = update::passive_installer_args()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let instance = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR(parameters.as_ptr()),
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    if (instance.0 as isize) <= 32 {
+        return Err(format!(
+            "Cannot launch the update installer (code {})",
+            instance.0 as isize
+        ));
+    }
+    Ok(())
+}
+
 fn start_update_download(host: HWND, manifest: Manifest) {
     if UPDATE_DOWNLOADING.swap(true, Ordering::AcqRel) {
         return;
@@ -4696,11 +4727,91 @@ fn paint_live_preview(hwnd: HWND) {
 }
 
 fn repaint_layered_radial(hwnd: HWND) {
-    SESSION.with(|cell| {
-        let session = cell.borrow();
-        let bitmap = session.radial_bitmap.as_ref();
-        paint_color_key_bitmap(hwnd, bitmap);
-    });
+    let bitmap = SESSION.with(|cell| cell.borrow().radial_bitmap.clone());
+    if let Some(bitmap) = bitmap {
+        let _ = present_radial_alpha(hwnd, &bitmap);
+    }
+    validate_paint(hwnd);
+}
+
+fn present_radial_alpha(hwnd: HWND, bitmap: &PresentedBitmap) -> Result<(), String> {
+    let width = bitmap.width;
+    let height = bitmap.height;
+    if width <= 0 || height <= 0 || bitmap.pixels.len() != (width * height) as usize {
+        return Err("radial bitmap has the wrong size".into());
+    }
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+    let dib = unsafe { CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) }
+        .map_err(|error| format!("cannot create the radial surface: {error}"))?;
+    if bits.is_null() {
+        let _ = unsafe { DeleteObject(HGDIOBJ(dib.0)) };
+        return Err("radial surface has no pixels".into());
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bitmap.pixels.as_ptr(),
+            bits.cast::<u32>(),
+            bitmap.pixels.len(),
+        );
+    }
+    let memory = unsafe { CreateCompatibleDC(None) };
+    if memory.is_invalid() {
+        let _ = unsafe { DeleteObject(HGDIOBJ(dib.0)) };
+        return Err("cannot create the radial device".into());
+    }
+    let previous = unsafe { SelectObject(memory, HGDIOBJ(dib.0)) };
+    let mut window = RECT::default();
+    let positioned = unsafe { GetWindowRect(hwnd, &mut window) }.is_ok();
+    let destination = POINT {
+        x: if positioned { window.left } else { 0 },
+        y: if positioned { window.top } else { 0 },
+    };
+    let size = windows::Win32::Foundation::SIZE {
+        cx: width,
+        cy: height,
+    };
+    let source = POINT::default();
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let presented = unsafe {
+        UpdateLayeredWindow(
+            hwnd,
+            None,
+            Some(&destination),
+            Some(&size),
+            Some(memory),
+            Some(&source),
+            COLORREF::default(),
+            Some(&blend),
+            ULW_ALPHA,
+        )
+    };
+    if !previous.0.is_null() {
+        unsafe {
+            let _ = SelectObject(memory, previous);
+        }
+    }
+    unsafe {
+        let _ = DeleteDC(memory);
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+    }
+    presented.map_err(|error| format!("cannot present the radial: {error}"))
 }
 
 fn paint_color_key_bitmap(hwnd: HWND, bitmap: Option<&PresentedBitmap>) {
@@ -4770,6 +4881,7 @@ fn paint_color_key_bitmap(hwnd: HWND, bitmap: Option<&PresentedBitmap>) {
     }
 }
 
+#[allow(dead_code)]
 fn color_key_pixel(premultiplied: u32) -> u32 {
     let alpha = (premultiplied >> 24) & 0xff;
     if alpha < 128 {

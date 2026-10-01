@@ -159,7 +159,7 @@ impl Default for Settings {
             custom_frames: Vec::new(),
             radial_size: 100,
             radial_thickness: 14,
-            radial_corner_radius: 20,
+            radial_corner_radius: 50,
             accent_color: 0xF4F4F0,
             preview_opacity: 170,
             preview_padding: 10,

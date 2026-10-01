@@ -2,10 +2,14 @@ use orbit::geometry::Action;
 use orbit::settings::Settings;
 
 const CANVAS_GUTTER_PT: u32 = 80;
-/// Neutral glass, matched to Prism's dark shell. Equal channels, no blue cast.
-const RING_BODY: u32 = 0x2A2A2E;
-const RING_EDGE: u32 = 0xF4F4F6;
-const RING_CAP: u32 = 0xFFFFFF;
+/// Neutral glass. Equal channels, no blue cast.
+/// Prism's dark shell: oklch(0.17 0.009 268) over oklch(0.152 0.008 268).
+const RING_OUTER: u32 = 0x1C1D22;
+const RING_INNER: u32 = 0x16171C;
+/// Quiet hairline, the same 8% white edge as Prism's shell.
+const RING_LINE: u32 = 0xFFFFFF;
+/// Selected arc. Prism foreground, not a blown-out white pill.
+const RING_CAP: u32 = 0xE8E8EC;
 
 #[derive(Clone, Debug)]
 pub struct RadialBitmap {
@@ -140,66 +144,34 @@ fn render(
     let straight = centerline_half - centerline_corner;
     let quarter_length = 2.0 * straight + std::f64::consts::FRAC_PI_2 * centerline_corner;
     let perimeter = 4.0 * quarter_length;
-    let selected_positions: Vec<f64> = selected_slots
-        .iter()
-        .enumerate()
-        .filter(|(_, selected)| **selected)
-        .map(|(slot, _)| slot as f64 * perimeter / 8.0)
-        .collect();
 
+    let draw = RingDraw {
+        outer,
+        inner,
+        outer_corner,
+        inner_corner,
+        thickness,
+        scale,
+        stroke_half,
+        straight,
+        centerline_corner,
+        perimeter,
+        accent,
+        gradient,
+        use_gradient: settings.use_gradient,
+    };
+    let mut aims = [0.0; 8];
+    let mut aim_count = 0;
+    for (slot, selected) in selected_slots.iter().enumerate() {
+        if *selected {
+            aims[aim_count] = slot as f64 * perimeter / 8.0;
+            aim_count += 1;
+        }
+    }
     for y in 0..size {
         for x in 0..size {
-            let dx = f64::from(x) + 0.5 - center;
-            let dy = f64::from(y) + 0.5 - center;
-            let outer_distance = rounded_box_distance(dx, dy, outer, outer, outer_corner);
-            let inner_distance = rounded_box_distance(dx, dy, inner, inner, inner_corner);
-            // Intersect rounded outer coverage with the inverse rounded inner shape. Radius 0
-            // produces a square-corner ring; radius equal to half the diameter produces a circle.
-            let ring_coverage = ((-outer_distance).min(inner_distance) + 0.5).clamp(0.0, 1.0);
-            // A restrained light edge separates the dark HUD ring from its background.
-            let edge_depth = (-outer_distance).min(inner_distance);
-            let edge_strength = (1.0 - edge_depth / (1.5 * scale)).clamp(0.0, 1.0);
-            let mut color = interpolate_rgb(RING_BODY, RING_EDGE, edge_strength * 0.92);
-            let alpha = ring_coverage * 255.0;
-            if ring_coverage > 0.0 && !selected_positions.is_empty() {
-                let position = rounded_square_path_position(
-                    dx,
-                    dy,
-                    straight,
-                    centerline_corner,
-                    quarter_length,
-                );
-                let normal = (stroke_half - edge_depth).clamp(0.0, stroke_half);
-                let rounded_end = (stroke_half * stroke_half - normal * normal)
-                    .max(0.0)
-                    .sqrt();
-                let arc_half = perimeter / 16.0;
-                let mut cap_coverage = 0.0f64;
-                let mut cap_fade = 0.0f64;
-                for center_position in &selected_positions {
-                    let delta = (position - center_position).abs();
-                    let along = delta.min(perimeter - delta);
-                    let coverage =
-                        (arc_half - stroke_half + rounded_end - along + 0.5).clamp(0.0, 1.0);
-                    if coverage > cap_coverage {
-                        cap_coverage = coverage;
-                        cap_fade = (1.0 - along / arc_half).clamp(0.0, 1.0);
-                    }
-                }
-                let cap_color = if settings.use_gradient {
-                    interpolate_rgb(accent, gradient, cap_fade)
-                } else {
-                    channels(RING_CAP)
-                };
-                for (value, cap_value) in color.iter_mut().zip(cap_color) {
-                    *value += (cap_value - *value) * cap_coverage;
-                }
-                for (value, rim_value) in color.iter_mut().zip(channels(RING_EDGE)) {
-                    *value += (rim_value - *value) * edge_strength * cap_coverage * 0.35;
-                }
-            }
-
-            pixels[(y * size + x) as usize] = premultiplied_bgra(color, alpha);
+            pixels[(y * size + x) as usize] =
+                draw.supersample(f64::from(x), f64::from(y), center, &aims[..aim_count]);
         }
     }
 
@@ -283,9 +255,11 @@ fn channels(color: u32) -> [f64; 3] {
 pub struct RingSample {
     pub index: u32,
     pub position: f32,
+    #[allow(dead_code)]
     pub edge_strength: f32,
-    pub rounded_end: f32,
+    #[allow(dead_code)]
     pub alpha: f32,
+    #[allow(dead_code)]
     pub color: [f32; 3],
 }
 
@@ -303,6 +277,7 @@ pub struct RadialStamp {
     pub centerline_corner: f64,
     pub centerline_half: f64,
     pub stroke_half: f64,
+    pub scale: f64,
 }
 
 struct RadialMetrics {
@@ -379,6 +354,21 @@ pub fn build_stamp(settings: &Settings, dpi: u32) -> Result<RadialStamp, String>
         .ok_or_else(|| "radial menu is too large to render".to_string())?;
     let mut idle = vec![0u32; pixel_count];
     let mut samples = Vec::new();
+    let draw = RingDraw {
+        outer: metrics.outer,
+        inner: metrics.inner,
+        outer_corner: metrics.outer_corner,
+        inner_corner: metrics.inner_corner,
+        thickness: metrics.outer - metrics.inner,
+        scale: metrics.scale,
+        stroke_half: metrics.stroke_half,
+        straight: metrics.straight,
+        centerline_corner: metrics.centerline_corner,
+        perimeter: metrics.perimeter,
+        accent: metrics.accent,
+        gradient: metrics.gradient,
+        use_gradient: settings.use_gradient,
+    };
     for y in 0..metrics.size {
         for x in 0..metrics.size {
             let dx = f64::from(x) + 0.5 - metrics.center;
@@ -386,18 +376,9 @@ pub fn build_stamp(settings: &Settings, dpi: u32) -> Result<RadialStamp, String>
             if dx.abs().max(dy.abs()) > metrics.outer + 1.5 {
                 continue;
             }
-            let outer_distance =
-                rounded_box_distance(dx, dy, metrics.outer, metrics.outer, metrics.outer_corner);
-            let inner_distance =
-                rounded_box_distance(dx, dy, metrics.inner, metrics.inner, metrics.inner_corner);
-            let ring_coverage = ((-outer_distance).min(inner_distance) + 0.5).clamp(0.0, 1.0);
-            let edge_depth = (-outer_distance).min(inner_distance);
-            let edge_strength = (1.0 - edge_depth / (1.5 * metrics.scale)).clamp(0.0, 1.0);
-            let color = interpolate_rgb(RING_BODY, RING_EDGE, edge_strength * 0.92);
-            let alpha = ring_coverage * 255.0;
             let index = (y * metrics.size + x) as usize;
-            idle[index] = premultiplied_bgra(color, alpha);
-            if ring_coverage <= 0.0 {
+            idle[index] = draw.supersample(f64::from(x), f64::from(y), metrics.center, &[]);
+            if idle[index] >> 24 == 0 {
                 continue;
             }
             let position = rounded_square_path_position(
@@ -407,17 +388,12 @@ pub fn build_stamp(settings: &Settings, dpi: u32) -> Result<RadialStamp, String>
                 metrics.centerline_corner,
                 metrics.perimeter / 4.0,
             );
-            let normal = (metrics.stroke_half - edge_depth).clamp(0.0, metrics.stroke_half);
-            let rounded_end = (metrics.stroke_half * metrics.stroke_half - normal * normal)
-                .max(0.0)
-                .sqrt();
             samples.push(RingSample {
                 index: index as u32,
                 position: position as f32,
-                edge_strength: edge_strength as f32,
-                rounded_end: rounded_end as f32,
-                alpha: alpha as f32,
-                color: [color[0] as f32, color[1] as f32, color[2] as f32],
+                edge_strength: 0.0,
+                alpha: (idle[index] >> 24) as f32,
+                color: [0.0, 0.0, 0.0],
             });
         }
     }
@@ -433,7 +409,29 @@ pub fn build_stamp(settings: &Settings, dpi: u32) -> Result<RadialStamp, String>
         centerline_corner: metrics.centerline_corner,
         centerline_half: metrics.centerline_half,
         stroke_half: metrics.stroke_half,
+        scale: metrics.scale,
     })
+}
+
+fn ring_draw_from_stamp(stamp: &RadialStamp) -> RingDraw {
+    let thickness = stamp.stroke_half * 2.0;
+    let outer = stamp.centerline_half + stamp.stroke_half;
+    let inner = (stamp.centerline_half - stamp.stroke_half).max(0.0);
+    RingDraw {
+        outer,
+        inner,
+        outer_corner: stamp.centerline_corner + stamp.stroke_half,
+        inner_corner: stamp.centerline_corner.max(0.0).min(inner),
+        thickness,
+        scale: stamp.scale,
+        stroke_half: stamp.stroke_half,
+        straight: stamp.straight,
+        centerline_corner: stamp.centerline_corner,
+        perimeter: stamp.perimeter,
+        accent: stamp.accent,
+        gradient: stamp.gradient,
+        use_gradient: stamp.use_gradient,
+    }
 }
 
 fn position_at_angle(stamp: &RadialStamp, angle: f64) -> f64 {
@@ -476,39 +474,177 @@ pub fn paint_stamp(stamp: &RadialStamp, angle: Option<f64>) -> Vec<u32> {
         return pixels;
     }
     let center_position = position_at_angle(stamp, angle);
-    let arc_half = stamp.perimeter / 16.0;
-    let window = arc_half + stamp.stroke_half + 1.0;
+    let arc_half = cap_half(stamp.perimeter);
+    let window = arc_half + stamp.stroke_half + 4.0;
+    let draw = ring_draw_from_stamp(stamp);
+    let center = f64::from(stamp.size) / 2.0;
+    let aim = [center_position];
     for sample in &stamp.samples {
         let delta = (f64::from(sample.position) - center_position).abs();
         let along = delta.min(stamp.perimeter - delta);
         if along > window {
             continue;
         }
-        let coverage = (arc_half - stamp.stroke_half + f64::from(sample.rounded_end) - along + 0.5)
-            .clamp(0.0, 1.0);
-        if coverage <= 0.0 {
-            continue;
-        }
-        let cap_fade = (1.0 - along / arc_half).clamp(0.0, 1.0);
-        let cap_color = if stamp.use_gradient {
-            interpolate_rgb(stamp.accent, stamp.gradient, cap_fade)
-        } else {
-            channels(RING_CAP)
-        };
-        let mut color = [
-            f64::from(sample.color[0]),
-            f64::from(sample.color[1]),
-            f64::from(sample.color[2]),
-        ];
-        for (value, cap_value) in color.iter_mut().zip(cap_color) {
-            *value += (cap_value - *value) * coverage;
-        }
-        for (value, rim_value) in color.iter_mut().zip(channels(RING_EDGE)) {
-            *value += (rim_value - *value) * f64::from(sample.edge_strength) * coverage * 0.35;
-        }
-        pixels[sample.index as usize] = premultiplied_bgra(color, f64::from(sample.alpha));
+        let x = f64::from(sample.index % width as u32);
+        let y = f64::from(sample.index / width as u32);
+        pixels[sample.index as usize] = draw.supersample(x, y, center, &aim);
     }
     pixels
+}
+
+struct RingShade {
+    color: [f64; 3],
+    coverage: f64,
+    #[allow(dead_code)]
+    edge_depth: f64,
+}
+
+struct RingDraw {
+    outer: f64,
+    inner: f64,
+    outer_corner: f64,
+    inner_corner: f64,
+    thickness: f64,
+    scale: f64,
+    #[allow(dead_code)]
+    stroke_half: f64,
+    straight: f64,
+    centerline_corner: f64,
+    perimeter: f64,
+    accent: u32,
+    gradient: u32,
+    use_gradient: bool,
+}
+
+impl RingDraw {
+    /// 3x3 grid. Interior pixels stay fully solid; only the rim is averaged.
+    fn supersample(&self, x: f64, y: f64, center: f64, aims: &[f64]) -> u32 {
+        let offsets = [-0.375, -0.125, 0.125, 0.375];
+        let mut alpha_sum = 0.0;
+        let mut color_sum = [0.0, 0.0, 0.0];
+        let samples = (offsets.len() * offsets.len()) as f64;
+        for oy in offsets {
+            for ox in offsets {
+                let (color, alpha) = self.fragment(x + 0.5 + ox, y + 0.5 + oy, center, aims);
+                alpha_sum += alpha;
+                for (channel, value) in color_sum.iter_mut().zip(color) {
+                    *channel += value * alpha;
+                }
+            }
+        }
+        let alpha = alpha_sum / samples;
+        let color = if alpha_sum > 0.0 {
+            [
+                color_sum[0] / alpha_sum,
+                color_sum[1] / alpha_sum,
+                color_sum[2] / alpha_sum,
+            ]
+        } else {
+            [0.0, 0.0, 0.0]
+        };
+        premultiplied_bgra(color, alpha)
+    }
+
+    fn fragment(&self, x: f64, y: f64, center: f64, aims: &[f64]) -> ([f64; 3], f64) {
+        let dx = x - center;
+        let dy = y - center;
+        let circle = self.outer_corner >= self.outer - 0.5;
+        let (outer_distance, inner_distance) = if circle {
+            let radius = dx.hypot(dy);
+            (radius - self.outer, radius - self.inner)
+        } else {
+            (
+                rounded_box_distance(dx, dy, self.outer, self.outer, self.outer_corner),
+                rounded_box_distance(dx, dy, self.inner, self.inner, self.inner_corner),
+            )
+        };
+        let shade = shade_ring(outer_distance, inner_distance, self.thickness, self.scale);
+        let mut color = shade.color;
+        let sky = ((-dy) / self.outer.max(1.0)).clamp(0.0, 1.0);
+        blend_toward(&mut color, channels(RING_LINE), sky * 0.05);
+        if shade.coverage > 0.0 && !aims.is_empty() {
+            let along = if circle {
+                let angle = dy.atan2(dx);
+                let mut best = f64::MAX;
+                for center_position in aims {
+                    let aim = *center_position / self.perimeter * std::f64::consts::TAU;
+                    let mut delta = (angle - aim).abs();
+                    if delta > std::f64::consts::PI {
+                        delta = std::f64::consts::TAU - delta;
+                    }
+                    best = best.min(delta);
+                }
+                best
+            } else {
+                let quarter = self.perimeter / 4.0;
+                let position = rounded_square_path_position(
+                    dx,
+                    dy,
+                    self.straight,
+                    self.centerline_corner,
+                    quarter,
+                );
+                aims.iter()
+                    .map(|center_position| {
+                        circular_along(position, *center_position, self.perimeter)
+                    })
+                    .fold(f64::MAX, f64::min)
+            };
+            let half = if circle {
+                0.42
+            } else {
+                cap_half(self.perimeter)
+            };
+            let cap_coverage = smoothstep((half - along) / (half * 0.78));
+            let cap_fade = (1.0 - along / half.max(0.001)).clamp(0.0, 1.0);
+            let cap_color = if self.use_gradient {
+                interpolate_rgb(self.accent, self.gradient, cap_fade)
+            } else {
+                channels(RING_CAP)
+            };
+            // A lifted selection, like Prism's active row, kept inside the stroke.
+            blend_toward(&mut color, cap_color, cap_coverage * 0.82);
+        }
+        (color, shade.coverage * 255.0)
+    }
+}
+
+fn shade_ring(outer_distance: f64, inner_distance: f64, thickness: f64, scale: f64) -> RingShade {
+    let edge = (-outer_distance).min(inner_distance);
+    let coverage = smoothstep((edge + 1.35) / 2.7);
+    let edge_depth = edge.max(0.0);
+    let from_outer = (-outer_distance).max(0.0);
+    let depth = (from_outer / thickness.max(1.0)).clamp(0.0, 1.0);
+    let mut color = interpolate_rgb(RING_OUTER, RING_INNER, depth * 0.65);
+    let hair = (1.0 - from_outer / (1.15 * scale.max(1.0))).clamp(0.0, 1.0);
+    blend_toward(&mut color, channels(RING_LINE), hair * hair * 0.08);
+    RingShade {
+        color,
+        coverage,
+        edge_depth,
+    }
+}
+
+fn circular_along(position: f64, center: f64, perimeter: f64) -> f64 {
+    let delta = (position - center).abs();
+    delta.min(perimeter - delta)
+}
+
+/// Half-length of the aim cap. About 0.32 rad on a circle, short of one sector.
+fn cap_half(perimeter: f64) -> f64 {
+    (perimeter * 0.32 / std::f64::consts::TAU).max(4.0)
+}
+
+fn smoothstep(value: f64) -> f64 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn blend_toward(color: &mut [f64; 3], target: [f64; 3], amount: f64) {
+    let amount = amount.clamp(0.0, 1.0);
+    for (value, target) in color.iter_mut().zip(target) {
+        *value += (target - *value) * amount;
+    }
 }
 
 fn interpolate_rgb(first: u32, second: u32, position: f64) -> [f64; 3] {
@@ -579,7 +715,10 @@ mod tests {
     fn glass_cap_is_white_and_the_outside_stays_clear() {
         let bitmap = render_bitmap_for_sector(&Settings::default(), Some(0), 96).unwrap();
         let cap_middle = (at(&bitmap, 130, 90) >> 16) & 0xff;
-        assert!(cap_middle > 230, "the aimed arc is white glass");
+        assert!(
+            cap_middle > 150,
+            "the aimed arc is the lifted shell selection"
+        );
         assert!(at(&bitmap, 139, 90) >> 24 > 80, "the rim is still drawn");
         assert_eq!(
             at(&bitmap, 150, 90) >> 24,
@@ -604,7 +743,7 @@ mod tests {
                 let red = (pixel >> 16) & 0xff;
                 let green = (pixel >> 8) & 0xff;
                 let blue = pixel & 0xff;
-                let aimed = pixel >> 24 > 200 && red > 220 && green > 220 && blue > 220;
+                let aimed = pixel >> 24 > 200 && red > 150 && green > 150 && blue > 150;
                 if aimed {
                     let dx = f64::from(x) + 0.5 - center;
                     let dy = f64::from(y) + 0.5 - center;
@@ -646,8 +785,8 @@ mod tests {
         let green = (cap >> 8) & 0xff;
         let blue = cap & 0xff;
         assert!(
-            red > 220 && green > 220 && blue > 220,
-            "cap {cap:#x} should be white glass"
+            red > 150 && green > 150 && blue > 150,
+            "cap {cap:#x} should be the lifted shell selection"
         );
         assert!(
             (red as i32 - blue as i32).abs() < 18,

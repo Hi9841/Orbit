@@ -68,14 +68,14 @@ const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
     COLORREF(red as u32 | ((green as u32) << 8) | ((blue as u32) << 16))
 }
 
-const COLOR_CANVAS: COLORREF = rgb(12, 14, 18);
-const COLOR_SIDEBAR: COLORREF = rgb(17, 19, 24);
-const COLOR_PANEL: COLORREF = rgb(22, 24, 30);
-const COLOR_INPUT: COLORREF = rgb(30, 33, 40);
-const COLOR_SELECTION: COLORREF = rgb(40, 40, 44);
-const COLOR_DIVIDER: COLORREF = rgb(42, 46, 56);
+const COLOR_CANVAS: COLORREF = rgb(16, 16, 18);
+const COLOR_SIDEBAR: COLORREF = rgb(16, 16, 18);
+const COLOR_PANEL: COLORREF = rgb(16, 16, 18);
+const COLOR_INPUT: COLORREF = rgb(46, 46, 52);
+const COLOR_SELECTION: COLORREF = rgb(34, 34, 38);
+const COLOR_DIVIDER: COLORREF = rgb(40, 40, 44);
 const COLOR_TEXT: COLORREF = rgb(244, 244, 242);
-const COLOR_MUTED: COLORREF = rgb(148, 154, 166);
+const COLOR_MUTED: COLORREF = rgb(154, 154, 160);
 const COLOR_ERROR: COLORREF = rgb(248, 152, 148);
 const COLOR_ACCENT: COLORREF = rgb(236, 236, 240);
 const COLOR_ACCENT_INK: COLORREF = rgb(18, 18, 22);
@@ -629,7 +629,7 @@ fn paint_background(hwnd: HWND, hdc: HDC) {
     let dpi = dpi_for_window(hwnd);
     BRUSHES.with(|slot| {
         if let Some(brushes) = slot.get() {
-            let sidebar_width = px(248, dpi);
+            let sidebar_width = px(232, dpi);
             unsafe {
                 FillRect(hdc, &rect, brushes.canvas);
                 FillRect(
@@ -652,8 +652,8 @@ fn paint_background(hwnd: HWND, hdc: HDC) {
                 FillRect(
                     hdc,
                     &RECT {
-                        top: rect.bottom - px(84, dpi),
-                        bottom: rect.bottom - px(83, dpi),
+                        top: rect.bottom - px(80, dpi),
+                        bottom: rect.bottom - px(79, dpi),
                         ..rect
                     },
                     brushes.divider,
@@ -690,14 +690,12 @@ fn control_brush(message: u32, control: HWND, hdc: HDC) -> HBRUSH {
             (brushes.canvas, COLOR_CANVAS, text)
         } else if parent_is_class(control, "ComboBox") {
             (brushes.input, COLOR_INPUT, COLOR_TEXT)
-        } else if message == WM_CTLCOLORBTN && !is_group_id(id) {
-            (brushes.panel, COLOR_PANEL, COLOR_TEXT)
         } else if id >= FIELD_ERROR_BASE
             || matches!(id, RADIAL_ERROR | SHORTCUTS_ERROR | FRAMES_ERROR)
         {
-            (brushes.panel, COLOR_PANEL, COLOR_ERROR)
+            (brushes.canvas, COLOR_CANVAS, COLOR_ERROR)
         } else {
-            (brushes.panel, COLOR_PANEL, COLOR_TEXT)
+            (brushes.canvas, COLOR_CANVAS, COLOR_TEXT)
         };
         // Disabled statics keep COLOR_ERROR on COLOR_PANEL at low contrast.
         // Mute disabled text instead of restructuring the enable logic.
@@ -726,12 +724,28 @@ fn draw_sidebar_item(item: &DRAWITEMSTRUCT) {
         let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
         unsafe {
             FillRect(item.hDC, &item.rcItem, brushes.sidebar);
+            if selected {
+                let pill = RECT {
+                    left: item.rcItem.left + 8,
+                    top: item.rcItem.top + 4,
+                    right: item.rcItem.right - 8,
+                    bottom: item.rcItem.bottom - 4,
+                };
+                FillRect(item.hDC, &pill, brushes.selection);
+                let mark = RECT {
+                    left: pill.left,
+                    top: pill.top,
+                    right: pill.left + 3,
+                    bottom: pill.bottom,
+                };
+                FillRect(item.hDC, &mark, brushes.accent);
+            }
             let _ = SetBkMode(item.hDC, windows::Win32::Graphics::Gdi::TRANSPARENT);
             let _ = SetTextColor(item.hDC, if selected { COLOR_TEXT } else { COLOR_MUTED });
             let mut label = to_wide(title);
             let label_len = label.len() - 1;
             let mut label_rect = RECT {
-                left: item.rcItem.left + 16,
+                left: item.rcItem.left + 24,
                 right: item.rcItem.right - 16,
                 ..item.rcItem
             };
@@ -916,24 +930,11 @@ fn fit_window_to_work_area(hwnd: HWND, desired_width: i32, desired_height: i32) 
     };
 }
 
-fn content_extent(page: usize, height: i32) -> i32 {
-    match page {
-        0 => (height - 220).max(474),
-        3 => (height - 220).max(430),
-        4 => (height - 220).max(404),
-        5 => (height - 220).max(296),
-        1 => (height - 220).max(450),
-        2 => (height - 220).max(470),
-        6 => (height - 220).max(560),
-        7 => 238,
-        _ => 0,
-    }
-}
-
-fn update_scrollbar(hwnd: HWND, page: usize, height: i32) {
-    let viewport = (height - 220).max(1);
-    let extent = content_extent(page, height);
-    let max_scroll = (extent - viewport).max(0);
+fn update_scrollbar(hwnd: HWND, content_bottom: i32, height: i32) {
+    let header = 108;
+    let footer = 88;
+    let viewport = (height - header - footer).max(1);
+    let max_scroll = (content_bottom + 24 - (height - footer)).max(0);
     STATE.with(|state| {
         if let Some(state) = state.borrow_mut().as_mut() {
             state.scroll_offset = state.scroll_offset.clamp(0, max_scroll);
@@ -949,7 +950,7 @@ fn update_scrollbar(hwnd: HWND, page: usize, height: i32) {
         cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
         fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
         nMin: 0,
-        nMax: extent.saturating_sub(1),
+        nMax: (max_scroll + viewport).saturating_sub(1),
         nPage: viewport as u32,
         nPos: position,
         ..Default::default()
@@ -959,7 +960,7 @@ fn update_scrollbar(hwnd: HWND, page: usize, height: i32) {
 
 fn scroll_page(hwnd: HWND, command: i32) {
     let (_, height) = client_size_logical(hwnd);
-    let viewport = (height - 220).max(1);
+    let viewport = (height - 108 - 88).max(1);
     let mut info = SCROLLINFO {
         cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
         fMask: SIF_TRACKPOS,
@@ -1061,7 +1062,7 @@ fn fill_sidebar(hwnd: HWND) {
 
 fn set_sidebar_item_height(hwnd: HWND) {
     if let Ok(sidebar) = unsafe { GetDlgItem(Some(hwnd), SIDEBAR) } {
-        let height = px(40, dpi_for_window(hwnd));
+        let height = px(44, dpi_for_window(hwnd));
         unsafe {
             SendMessageW(
                 sidebar,
@@ -1173,7 +1174,7 @@ fn create_numeric(parent: HWND, id: i32, title: &str, value: i64) -> Result<(), 
         parent,
         w!("EDIT"),
         PCWSTR(wide.as_ptr()),
-        WS_TABSTOP | WINDOW_STYLE(ES_NUMBER as u32),
+        WS_TABSTOP | WINDOW_STYLE(ES_NUMBER as u32 | 0x0080_0000),
         id,
     )?;
     create_text(parent, field_error_id(id), "")?;
@@ -1183,7 +1184,13 @@ fn create_numeric(parent: HWND, id: i32, title: &str, value: i64) -> Result<(), 
 fn create_decimal(parent: HWND, id: i32, title: &str, value: f64) -> Result<(), String> {
     create_text(parent, id + 1000, title)?;
     let wide = to_wide(&format_float(value));
-    child(parent, w!("EDIT"), PCWSTR(wide.as_ptr()), WS_TABSTOP, id)?;
+    child(
+        parent,
+        w!("EDIT"),
+        PCWSTR(wide.as_ptr()),
+        WS_TABSTOP | WINDOW_STYLE(0x0080_0000),
+        id,
+    )?;
     create_text(parent, field_error_id(id), "")?;
     Ok(())
 }
@@ -1195,7 +1202,9 @@ fn create_edit(parent: HWND, id: i32, text: &str, multiline: bool) -> Result<(),
         style |= WS_VSCROLL
             | WINDOW_STYLE(ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | ES_WANTRETURN as u32);
     } else {
-        style |= WINDOW_STYLE(windows::Win32::UI::WindowsAndMessaging::ES_AUTOHSCROLL as u32);
+        style |= WINDOW_STYLE(
+            windows::Win32::UI::WindowsAndMessaging::ES_AUTOHSCROLL as u32 | 0x0080_0000,
+        );
     }
     child(parent, w!("EDIT"), PCWSTR(wide.as_ptr()), style, id)?;
     Ok(())
@@ -1272,7 +1281,7 @@ fn destroy_page_controls(hwnd: HWND) {
 }
 
 fn build_behavior(hwnd: HWND, settings: &Settings) -> Result<(), String> {
-    create_group(hwnd, 1700, "Window placement")?;
+    create_group(hwnd, 1700, "Placement")?;
     create_numeric(
         hwnd,
         BEHAVIOR_PADDING,
@@ -1300,53 +1309,53 @@ fn build_behavior(hwnd: HWND, settings: &Settings) -> Result<(), String> {
     create_checkbox(
         hwnd,
         BEHAVIOR_SNAP,
-        "Snap windows while dragging",
+        "Snap while dragging",
         settings.snap_on_drag,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_SCREEN_CURSOR,
-        "Use the monitor under the cursor",
+        "Use the monitor under the pointer",
         settings.use_screen_with_cursor,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_RESIZE_CURSOR,
-        "Resize the window under the cursor",
+        "Resize the window under the pointer",
         settings.resize_window_under_cursor,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_FOCUS_RESIZE,
-        "Focus the window after resizing",
+        "Focus the window after a resize",
         settings.focus_window_on_resize,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_MOVE_CURSOR,
-        "Move the cursor with the resized window",
+        "Move the pointer with the window",
         settings.move_cursor_with_window,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_IGNORE_FULLSCREEN,
-        "Ignore full-screen windows",
+        "Skip full-screen windows",
         settings.ignore_fullscreen,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_DISABLE_CURSOR,
-        "Disable radial cursor interaction",
+        "Ignore the pointer on the radial",
         settings.disable_cursor_interaction,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_LOCK_CENTER,
-        "Keep the radial menu centered on its target",
+        "Lock the radial to the window",
         settings.lock_radial_menu_to_center,
     )?;
 
-    create_group(hwnd, 1701, "Trigger and timing")?;
+    create_group(hwnd, 1701, "Trigger")?;
     create_checkbox(
         hwnd,
         BEHAVIOR_TRIGGER_CONTROL,
@@ -1380,32 +1389,32 @@ fn build_behavior(hwnd: HWND, settings: &Settings) -> Result<(), String> {
     create_checkbox(
         hwnd,
         BEHAVIOR_CYCLE_SHIFT,
-        "Reverse cycles while holding Shift",
+        "Shift reverses a cycle",
         settings.cycle_backwards_on_shift,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_REVERSE_SCROLL,
-        "Reverse scroll direction",
+        "Reverse scroll",
         settings.reverse_scroll,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_LAUNCH_LOGIN,
-        "Launch Orbit when I sign in",
+        "Start when I sign in",
         settings.launch_at_login,
     )?;
     create_checkbox(
         hwnd,
         BEHAVIOR_UPDATES_ENABLED,
-        "Check for updates automatically",
+        "Check for updates",
         settings.updates_enabled,
     )?;
     Ok(())
 }
 
 fn build_radial(hwnd: HWND, settings: &Settings) -> Result<(), String> {
-    create_group(hwnd, 1710, "Radial menu")?;
+    create_group(hwnd, 1710, "Appearance")?;
     create_checkbox(
         hwnd,
         RADIAL_VISIBLE,
@@ -1473,6 +1482,7 @@ fn build_radial(hwnd: HWND, settings: &Settings) -> Result<(), String> {
             SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(selected)), None);
         }
     }
+    create_group(hwnd, 1711, "Directions")?;
     create_text(hwnd, RADIAL_ERROR, "")?;
     Ok(())
 }
@@ -1518,13 +1528,13 @@ fn build_preview(hwnd: HWND, settings: &Settings) -> Result<(), String> {
     create_text(
         hwnd,
         1721,
-        "The selected frame sets preview size. Border and fallback radius scale with DPI; the per-pixel radius stays active on Windows versions without DWM rounded corners.",
+        "Border thickness and the fallback corner radius follow the screen scale.",
     )?;
     Ok(())
 }
 
 fn build_advanced(hwnd: HWND, settings: &Settings) -> Result<(), String> {
-    create_group(hwnd, ADV_GROUP_PLACEMENT, "Placement, edges, and animation")?;
+    create_group(hwnd, ADV_GROUP_PLACEMENT, "Edges and motion")?;
     create_decimal(
         hwnd,
         ADV_MIN_SCREEN_INCHES,
@@ -1599,7 +1609,7 @@ fn build_advanced(hwnd: HWND, settings: &Settings) -> Result<(), String> {
         settings.ignore_low_power_mode,
     )?;
 
-    create_group(hwnd, ADV_GROUP_INPUT, "Input, cycling, and updates")?;
+    create_group(hwnd, ADV_GROUP_INPUT, "Input")?;
     create_text(hwnd, ADV_PREVIEW_START + 1000, "Start preview from")?;
     let preview_start = create_combo(hwnd, ADV_PREVIEW_START)?;
     for label in [
@@ -2397,13 +2407,9 @@ fn build_exclusions(hwnd: HWND, settings: &Settings) -> Result<(), String> {
     create_text(
         hwnd,
         1751,
-        "Enter one executable name per line, for example: game.exe",
+        "One executable name per line, for example game.exe.",
     )?;
-    create_text(
-        hwnd,
-        1752,
-        "Excluded windows will not be moved or resized by Orbit.",
-    )?;
+    create_text(hwnd, 1752, "Orbit leaves these windows where they are.")?;
     create_edit(
         hwnd,
         EXCLUSIONS_TEXT,
@@ -2446,57 +2452,103 @@ pub fn set_update_status(text: &str) {
 
 fn layout_window(hwnd: HWND) {
     let (width, height) = client_size_logical(hwnd);
-    move_control(hwnd, BRAND, 28, 32, 160, 22);
+    move_control(hwnd, BRAND, 24, 28, 168, 24);
     move_control(hwnd, SIDEBAR_LABEL, 0, -40, 1, 1);
-    move_control(hwnd, SIDEBAR, 12, 84, 224, (height - 168).max(160));
+    move_control(hwnd, SIDEBAR, 8, 72, 208, (height - 164).max(160));
     raise_shell(hwnd);
-    move_control(hwnd, PAGE_TITLE, 284, 28, width - 328, 40);
-    move_control(hwnd, PAGE_DESCRIPTION, 284, -40, 1, 1);
-    move_control(hwnd, STATUS, 284, height - 92, (width - 620).max(80), 22);
-    move_control(hwnd, SAVE, width - 140, height - 60, 108, 36);
-    move_control(hwnd, CANCEL, width - 256, height - 60, 104, 36);
-    move_control(hwnd, EXPORT, width - 372, height - 60, 104, 36);
-    move_control(hwnd, IMPORT, width - 488, height - 60, 104, 36);
-    move_control(hwnd, RESET, 20, height - 60, 108, 36);
+    move_control(hwnd, PAGE_TITLE, 256, 24, width - 296, 32);
+    move_control(hwnd, PAGE_DESCRIPTION, 256, 58, width - 296, 22);
+    move_control(hwnd, STATUS, 256, height - 52, (width - 680).max(80), 22);
+    move_control(hwnd, SAVE, width - 148, height - 60, 116, 40);
+    move_control(hwnd, CANCEL, width - 264, height - 60, 108, 40);
+    move_control(hwnd, EXPORT, width - 380, height - 60, 108, 40);
+    move_control(hwnd, IMPORT, width - 496, height - 60, 108, 40);
+    move_control(hwnd, RESET, 16, height - 60, 108, 40);
 }
 
+struct Column {
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    width: i32,
+}
+
+impl Column {
+    fn heading(&mut self, id: i32) {
+        self.y += 22;
+        move_control(self.hwnd, id, self.x, self.y, self.width, 18);
+        self.y += 28;
+    }
+
+    fn number(&mut self, id: i32) {
+        layout_numeric(self.hwnd, id, self.x, self.y, self.width);
+        self.y += 48;
+    }
+
+    fn toggle(&mut self, id: i32) {
+        move_control(self.hwnd, id, self.x, self.y, self.width, 32);
+        self.y += 36;
+    }
+
+    fn line(&mut self, id: i32, height: i32) {
+        move_control(self.hwnd, id, self.x, self.y, self.width, height);
+        self.y += height + 8;
+    }
+
+    fn end(self) -> i32 {
+        self.y + 16
+    }
+}
 fn layout_page(hwnd: HWND, page: usize) {
     let (width, height) = client_size_logical(hwnd);
-    update_scrollbar(hwnd, page, height);
-    let x = 284;
-    let body_y = 112;
-    let body_width = (width - 320).max(360);
-    let gap = 32;
-    match page {
+    let pane_left = 248;
+    let pane_width = (width - pane_left - 36).max(480);
+    // One settings column, centered in the page. Rows run label-left, control-right.
+    let form = 680.min(pane_width);
+    let x = pane_left + (pane_width - form) / 2;
+    let mut column = Column {
+        hwnd,
+        x,
+        y: 104,
+        width: form,
+    };
+    let bottom = match page {
         0 => {
-            let column = (body_width - gap) / 2;
-            move_control(hwnd, 1700, x, body_y, column, 22);
-            move_control(hwnd, 1701, x + column + gap, body_y, column, 22);
-            let row = |n: i32| body_y + 36 + n * 48;
-            for (id, n) in [
-                (BEHAVIOR_PADDING, 0),
-                (BEHAVIOR_SIZE_INCREMENT, 1),
-                (BEHAVIOR_SNAP_THRESHOLD, 2),
-                (BEHAVIOR_STASH_PADDING, 3),
+            let side_by_side = false;
+            let mut trigger = Column {
+                hwnd,
+                x: if side_by_side { x + form + 28 } else { x },
+                y: if side_by_side { 96 } else { 0 },
+                width: form,
+            };
+            column.heading(1700);
+            for id in [
+                BEHAVIOR_PADDING,
+                BEHAVIOR_SIZE_INCREMENT,
+                BEHAVIOR_SNAP_THRESHOLD,
+                BEHAVIOR_STASH_PADDING,
             ] {
-                layout_numeric(hwnd, id, x + 16, row(n), column - 32);
+                column.number(id);
             }
-            for (id, n) in [
-                (BEHAVIOR_SNAP, 0),
-                (BEHAVIOR_SCREEN_CURSOR, 1),
-                (BEHAVIOR_RESIZE_CURSOR, 2),
-                (BEHAVIOR_FOCUS_RESIZE, 3),
-                (BEHAVIOR_MOVE_CURSOR, 4),
-                (BEHAVIOR_IGNORE_FULLSCREEN, 5),
-                (BEHAVIOR_DISABLE_CURSOR, 6),
-                (BEHAVIOR_LOCK_CENTER, 7),
+            for id in [
+                BEHAVIOR_SNAP,
+                BEHAVIOR_SCREEN_CURSOR,
+                BEHAVIOR_RESIZE_CURSOR,
+                BEHAVIOR_FOCUS_RESIZE,
+                BEHAVIOR_MOVE_CURSOR,
+                BEHAVIOR_IGNORE_FULLSCREEN,
+                BEHAVIOR_DISABLE_CURSOR,
+                BEHAVIOR_LOCK_CENTER,
             ] {
-                move_control(hwnd, id, x + 20, body_y + 248 + n * 38, column - 40, 32);
+                column.toggle(id);
             }
-
-            let rx = x + column + gap + 16;
-            let modifier_y = body_y + 36;
-            for (id, n) in [
+            if !side_by_side {
+                trigger.y = column.y;
+            }
+            trigger.heading(1701);
+            let modifier_y = trigger.y;
+            let modifier_width = trigger.width / 4;
+            for (id, index) in [
                 (BEHAVIOR_TRIGGER_CONTROL, 0),
                 (BEHAVIOR_TRIGGER_ALT, 1),
                 (BEHAVIOR_TRIGGER_SHIFT, 2),
@@ -2505,474 +2557,400 @@ fn layout_page(hwnd: HWND, page: usize) {
                 move_control(
                     hwnd,
                     id,
-                    rx + n * (column - 32) / 4,
+                    trigger.x + index * modifier_width,
                     modifier_y,
-                    (column - 32) / 4,
-                    26,
+                    modifier_width,
+                    28,
                 );
             }
+            trigger.y += 36;
             move_control(
                 hwnd,
                 BEHAVIOR_TRIGGER_KEY + 1000,
-                rx,
-                body_y + 72,
-                column - 120,
-                24,
-            );
-            move_control(
-                hwnd,
-                BEHAVIOR_TRIGGER_KEY,
-                rx + column - 116,
-                body_y + 69,
-                100,
-                240,
-            );
-            move_control(
-                hwnd,
-                BEHAVIOR_TRIGGER_ERROR,
-                rx,
-                body_y + 96,
-                column - 32,
-                20,
-            );
-            layout_numeric(hwnd, BEHAVIOR_TRIGGER_DELAY, rx, body_y + 126, column - 32);
-            layout_numeric(hwnd, BEHAVIOR_CYCLE_TIMEOUT, rx, body_y + 174, column - 32);
-            for (id, n) in [
-                (BEHAVIOR_CYCLE_SHIFT, 0),
-                (BEHAVIOR_REVERSE_SCROLL, 1),
-                (BEHAVIOR_LAUNCH_LOGIN, 2),
-                (BEHAVIOR_UPDATES_ENABLED, 3),
-            ] {
-                move_control(hwnd, id, rx, body_y + 222 + n * 30, column - 28, 26);
-            }
-        }
-        1 => {
-            let half = (body_width - gap) / 2;
-            move_control(hwnd, 1710, x, body_y, body_width, 22);
-            move_control(
-                hwnd,
-                RADIAL_VISIBLE,
-                x + 16,
-                body_y + 34,
-                body_width - 32,
-                26,
-            );
-            for (id, y) in [
-                (RADIAL_SIZE, 76),
-                (RADIAL_THICKNESS, 124),
-                (RADIAL_CORNER, 172),
-            ] {
-                layout_numeric(hwnd, id, x + 16, body_y + y, half - 24);
-            }
-            move_control(
-                hwnd,
-                RADIAL_COLOR + 1000,
-                x + half + 4,
-                body_y + 76,
-                half - 18,
-                24,
-            );
-            move_control(
-                hwnd,
-                RADIAL_COLOR,
-                x + half + 4,
-                body_y + 102,
-                half - 18,
-                25,
-            );
-            move_control(
-                hwnd,
-                field_error_id(RADIAL_COLOR),
-                x + half + 4,
-                body_y + 128,
-                half - 18,
-                18,
-            );
-            move_control(
-                hwnd,
-                RADIAL_SYSTEM_ACCENT,
-                x + half + 4,
-                body_y + 152,
-                half - 18,
-                26,
-            );
-            move_control(
-                hwnd,
-                RADIAL_GRADIENT,
-                x + half + 4,
-                body_y + 182,
-                half - 18,
-                26,
-            );
-            move_control(
-                hwnd,
-                RADIAL_GRADIENT_COLOR + 1000,
-                x + half + 4,
-                body_y + 210,
-                half - 18,
+                trigger.x,
+                trigger.y + 4,
+                trigger.width - 120,
                 22,
             );
             move_control(
                 hwnd,
-                RADIAL_GRADIENT_COLOR,
-                x + half + 4,
-                body_y + 234,
-                half - 18,
-                24,
+                BEHAVIOR_TRIGGER_KEY,
+                trigger.x + trigger.width - 112,
+                trigger.y,
+                112,
+                240,
             );
-            move_control(
+            trigger.y += 36;
+            trigger.line(BEHAVIOR_TRIGGER_ERROR, 16);
+            trigger.number(BEHAVIOR_TRIGGER_DELAY);
+            trigger.number(BEHAVIOR_CYCLE_TIMEOUT);
+            for id in [
+                BEHAVIOR_CYCLE_SHIFT,
+                BEHAVIOR_REVERSE_SCROLL,
+                BEHAVIOR_LAUNCH_LOGIN,
+                BEHAVIOR_UPDATES_ENABLED,
+            ] {
+                trigger.toggle(id);
+            }
+            column.end().max(trigger.end())
+        }
+        1 => {
+            let side_by_side = false;
+            let mut directions = Column {
                 hwnd,
-                field_error_id(RADIAL_GRADIENT_COLOR),
-                x + half + 4,
-                body_y + 258,
-                half - 18,
-                18,
-            );
+                x: if side_by_side { x + form + 28 } else { x },
+                y: 96,
+                width: form,
+            };
+            column.heading(1710);
+            column.toggle(RADIAL_VISIBLE);
+            column.number(RADIAL_SIZE);
+            column.number(RADIAL_THICKNESS);
+            column.number(RADIAL_CORNER);
+            for (label, field) in [
+                (RADIAL_COLOR + 1000, RADIAL_COLOR),
+                (RADIAL_GRADIENT_COLOR + 1000, RADIAL_GRADIENT_COLOR),
+            ] {
+                move_control(hwnd, label, column.x, column.y + 4, column.width - 168, 22);
+                move_control(
+                    hwnd,
+                    field,
+                    column.x + column.width - 160,
+                    column.y,
+                    160,
+                    26,
+                );
+                column.y += 30;
+                move_control(
+                    hwnd,
+                    field_error_id(field),
+                    column.x,
+                    column.y,
+                    column.width,
+                    14,
+                );
+                column.y += 18;
+            }
+            column.toggle(RADIAL_SYSTEM_ACCENT);
+            column.toggle(RADIAL_GRADIENT);
+            if !side_by_side {
+                directions.y = column.y;
+            }
+            directions.heading(1711);
             for slot in 0..ACTION_COUNT {
-                let col = slot / 4;
-                let row = slot % 4;
-                let cx = x + col as i32 * (half + gap) + 16;
-                let cy = body_y + 292 + row as i32 * 36;
-                move_control(hwnd, ACTION_LABEL_BASE + slot as i32, cx, cy, 112, 22);
+                let y = directions.y;
+                move_control(
+                    hwnd,
+                    ACTION_LABEL_BASE + slot as i32,
+                    directions.x,
+                    y + 4,
+                    112,
+                    22,
+                );
                 move_control(
                     hwnd,
                     RADIAL_ACTION_BASE + slot as i32,
-                    cx + 114,
-                    cy - 3,
-                    half - 142,
-                    250,
+                    directions.x + 120,
+                    y,
+                    directions.width - 120,
+                    240,
                 );
+                directions.y += 36;
             }
-            move_control(
-                hwnd,
-                RADIAL_ERROR,
-                x + 16,
-                body_y + 426,
-                body_width - 32,
-                24,
-            );
+            directions.line(RADIAL_ERROR, 18);
+            column.end().max(directions.end())
         }
         2 => {
-            move_control(hwnd, 1720, x, body_y, body_width, 22);
-            move_control(
-                hwnd,
-                PREVIEW_VISIBLE,
-                x + 16,
-                body_y + 38,
-                body_width - 32,
-                26,
-            );
-            for (id, y) in [
-                (PREVIEW_OPACITY, 92),
-                (PREVIEW_PADDING, 140),
-                (PREVIEW_CORNER, 188),
-                (PREVIEW_BORDER, 236),
+            column.heading(1720);
+            column.toggle(PREVIEW_VISIBLE);
+            for id in [
+                PREVIEW_OPACITY,
+                PREVIEW_PADDING,
+                PREVIEW_CORNER,
+                PREVIEW_BORDER,
             ] {
-                layout_numeric(hwnd, id, x + 16, body_y + y, 370);
+                column.number(id);
             }
-            move_control(
-                hwnd,
-                PREVIEW_WINDOW_CORNERS,
-                x + 16,
-                body_y + 284,
-                body_width - 32,
-                26,
-            );
-            move_control(hwnd, 1721, x + 16, body_y + 318, body_width - 32, 44);
+            column.toggle(PREVIEW_WINDOW_CORNERS);
+            column.line(1721, 40);
+            column.end()
         }
         3 => {
-            move_control(hwnd, 1730, x, body_y, body_width, 22);
-            move_control(hwnd, 1731, x + 16, body_y + 34, body_width - 32, 24);
-            let detail_x = x + 304;
-            let detail_width = body_width - 320;
-            move_control(hwnd, SHORTCUT_LIST, x + 16, body_y + 70, 264, 300);
-            move_control(hwnd, SHORTCUT_NEW, x + 16, body_y + 376, 104, 28);
-            move_control(hwnd, SHORTCUT_DELETE, x + 132, body_y + 376, 104, 28);
+            let wide = pane_width;
+            let x = pane_left;
+            move_control(hwnd, 1730, x, 108, wide, 22);
+            move_control(hwnd, 1731, x, 144, wide, 22);
+            let list_width = 280.min(wide / 3);
+            let detail_x = x + list_width + 28;
+            let detail_width = (wide - list_width - 28).max(240);
+            move_control(hwnd, SHORTCUT_LIST, x, 180, list_width, 320);
+            move_control(hwnd, SHORTCUT_NEW, x, 512, (list_width - 8) / 2, 40);
+            move_control(
+                hwnd,
+                SHORTCUT_DELETE,
+                x + (list_width - 8) / 2 + 8,
+                512,
+                (list_width - 8) / 2,
+                40,
+            );
+            let slot = detail_width / 4;
             for (id, index) in [
                 (SHORTCUT_CONTROL, 0),
                 (SHORTCUT_ALT, 1),
                 (SHORTCUT_SHIFT, 2),
                 (SHORTCUT_WIN, 3),
             ] {
-                move_control(
-                    hwnd,
-                    id,
-                    detail_x + index * detail_width / 4,
-                    body_y + 70,
-                    detail_width / 4,
-                    26,
-                );
+                move_control(hwnd, id, detail_x + index * slot, 180, slot, 36);
             }
             move_control(
                 hwnd,
                 SHORTCUT_KEY + 1000,
                 detail_x,
-                body_y + 108,
-                detail_width - 114,
+                228,
+                detail_width - 120,
                 22,
             );
             move_control(
                 hwnd,
                 SHORTCUT_KEY,
-                detail_x + detail_width - 108,
-                body_y + 104,
-                100,
+                detail_x + detail_width - 112,
+                224,
+                112,
                 230,
             );
-            move_control(hwnd, 1732, detail_x, body_y + 142, detail_width, 22);
-            move_control(
-                hwnd,
-                SHORTCUT_CYCLE_LIST,
-                detail_x,
-                body_y + 168,
-                detail_width,
-                100,
-            );
+            move_control(hwnd, 1732, detail_x, 264, detail_width, 22);
+            move_control(hwnd, SHORTCUT_CYCLE_LIST, detail_x, 294, detail_width, 120);
             move_control(
                 hwnd,
                 SHORTCUT_ACTION_PICKER + 1000,
                 detail_x,
-                body_y + 278,
-                detail_width - 196,
+                426,
+                detail_width - 156,
                 22,
             );
             move_control(
                 hwnd,
                 SHORTCUT_ACTION_PICKER,
                 detail_x,
-                body_y + 304,
-                detail_width - 196,
-                190,
+                452,
+                detail_width - 156,
+                200,
             );
             move_control(
                 hwnd,
                 SHORTCUT_ACTION_ADD,
-                detail_x + detail_width - 184,
-                body_y + 302,
-                176,
-                28,
+                detail_x + detail_width - 144,
+                452,
+                144,
+                40,
             );
             move_control(
                 hwnd,
                 SHORTCUT_ACTION_REMOVE,
-                detail_x + detail_width - 184,
-                body_y + 336,
-                176,
-                28,
+                detail_x + detail_width - 144,
+                500,
+                144,
+                40,
             );
-            move_control(
-                hwnd,
-                SHORTCUTS_ERROR,
-                detail_x,
-                body_y + 374,
-                detail_width,
-                32,
-            );
-            move_control(hwnd, SHORTCUT_APPLY, detail_x, body_y + 410, 148, 28);
+            move_control(hwnd, SHORTCUTS_ERROR, detail_x, 552, detail_width, 28);
+            move_control(hwnd, SHORTCUT_APPLY, detail_x, 588, 160, 40);
+            640
         }
         4 => {
-            move_control(hwnd, 1740, x, body_y, body_width, 22);
-            move_control(hwnd, 1741, x + 16, body_y + 34, body_width - 32, 24);
-            move_control(hwnd, FRAME_LIST, x + 16, body_y + 70, 264, 300);
-            move_control(hwnd, FRAME_NEW, x + 16, body_y + 376, 104, 28);
-            move_control(hwnd, FRAME_DELETE, x + 132, body_y + 376, 104, 28);
-            let form_x = x + 304;
-            let form_width = body_width - 320;
+            let wide = pane_width;
+            let x = pane_left;
+            move_control(hwnd, 1740, x, 108, wide, 22);
+            move_control(hwnd, 1741, x, 144, wide, 22);
+            let list_width = 280.min(wide / 3);
+            let form_x = x + list_width + 28;
+            let form_width = (wide - list_width - 28).max(240);
+            move_control(hwnd, FRAME_LIST, x, 180, list_width, 320);
+            move_control(hwnd, FRAME_NEW, x, 512, (list_width - 8) / 2, 40);
             move_control(
                 hwnd,
-                FRAME_NAME + 1000,
-                form_x,
-                body_y + 70,
-                form_width - 8,
-                22,
+                FRAME_DELETE,
+                x + (list_width - 8) / 2 + 8,
+                512,
+                (list_width - 8) / 2,
+                40,
             );
-            move_control(hwnd, FRAME_NAME, form_x, body_y + 94, form_width - 8, 24);
+            move_control(hwnd, FRAME_NAME + 1000, form_x, 180, form_width, 22);
+            move_control(hwnd, FRAME_NAME, form_x, 206, form_width, 28);
             move_control(
                 hwnd,
                 field_error_id(FRAME_NAME),
                 form_x,
-                body_y + 119,
-                form_width - 8,
-                16,
+                238,
+                form_width,
+                18,
             );
             let half = (form_width - 16) / 2;
-            layout_numeric(hwnd, FRAME_X, form_x, body_y + 140, half);
-            layout_numeric(hwnd, FRAME_Y, form_x + half + 16, body_y + 140, half);
-            layout_numeric(hwnd, FRAME_WIDTH, form_x, body_y + 190, half);
-            layout_numeric(hwnd, FRAME_HEIGHT, form_x + half + 16, body_y + 190, half);
-            move_control(hwnd, FRAMES_ERROR, form_x, body_y + 242, form_width, 42);
-            move_control(hwnd, FRAME_APPLY, form_x, body_y + 300, 148, 30);
+            layout_numeric(hwnd, FRAME_X, form_x, 268, half);
+            layout_numeric(hwnd, FRAME_Y, form_x + half + 16, 268, half);
+            layout_numeric(hwnd, FRAME_WIDTH, form_x, 320, half);
+            layout_numeric(hwnd, FRAME_HEIGHT, form_x + half + 16, 320, half);
+            move_control(hwnd, FRAMES_ERROR, form_x, 376, form_width, 36);
+            move_control(hwnd, FRAME_APPLY, form_x, 424, 160, 40);
+            564
         }
         5 => {
-            move_control(hwnd, 1750, x, body_y, body_width, 22);
-            move_control(hwnd, 1751, x + 16, body_y + 34, body_width - 32, 24);
-            move_control(hwnd, 1752, x + 16, body_y + 60, body_width - 32, 24);
+            column.heading(1750);
+            column.line(1751, 22);
+            column.line(1752, 22);
+            let field_height = (height - column.y - 120).max(220);
             move_control(
                 hwnd,
                 EXCLUSIONS_TEXT,
-                x + 16,
-                body_y + 96,
-                body_width - 32,
-                (height - body_y - 238).max(200),
+                pane_left,
+                column.y,
+                pane_width,
+                field_height,
             );
+            column.y + field_height + 16
         }
         6 => {
-            let column = (body_width - gap) / 2;
-            let right_x = x + column + gap;
-            move_control(hwnd, ADV_GROUP_PLACEMENT, x, body_y, column, 22);
-            move_control(hwnd, ADV_GROUP_INPUT, right_x, body_y, column, 22);
-            layout_numeric(
+            let side_by_side = false;
+            let mut input = Column {
                 hwnd,
-                ADV_MIN_SCREEN_INCHES,
-                x + 16,
-                body_y + 38,
-                column - 32,
-            );
-            move_control(hwnd, ADV_EDGE_ENABLED, x + 16, body_y + 82, column - 32, 26);
-            for (id, y) in [
-                (ADV_EDGE_TOP, 116),
-                (ADV_EDGE_RIGHT, 164),
-                (ADV_EDGE_BOTTOM, 212),
-                (ADV_EDGE_LEFT, 260),
-            ] {
-                layout_numeric(hwnd, id, x + 16, body_y + y, column - 32);
+                x: if side_by_side { x + form + 28 } else { x },
+                y: 96,
+                width: form,
+            };
+            column.heading(ADV_GROUP_PLACEMENT);
+            column.number(ADV_MIN_SCREEN_INCHES);
+            column.toggle(ADV_EDGE_ENABLED);
+            for id in [ADV_EDGE_TOP, ADV_EDGE_RIGHT, ADV_EDGE_BOTTOM, ADV_EDGE_LEFT] {
+                column.number(id);
             }
-            for (id, y) in [
-                (ADV_RESTORE_ON_DRAG, 310),
-                (ADV_SHIFT_FOCUS_STASHED, 340),
-                (ADV_ANIMATE_WINDOWS, 370),
-                (ADV_ANIMATE_STASHED, 400),
+            for id in [
+                ADV_RESTORE_ON_DRAG,
+                ADV_SHIFT_FOCUS_STASHED,
+                ADV_ANIMATE_WINDOWS,
+                ADV_ANIMATE_STASHED,
             ] {
-                move_control(hwnd, id, x + 16, body_y + y, column - 28, 26);
+                column.toggle(id);
             }
-            layout_numeric(
-                hwnd,
-                ADV_ANIMATION_DURATION,
-                x + 16,
-                body_y + 432,
-                column - 32,
-            );
-            move_control(
-                hwnd,
-                ADV_IGNORE_LOW_POWER,
-                x + 16,
-                body_y + 480,
-                column - 28,
-                26,
-            );
-
+            column.number(ADV_ANIMATION_DURATION);
+            column.toggle(ADV_IGNORE_LOW_POWER);
+            if !side_by_side {
+                input.y = column.y;
+            }
+            input.heading(ADV_GROUP_INPUT);
             move_control(
                 hwnd,
                 ADV_PREVIEW_START + 1000,
-                right_x + 16,
-                body_y + 38,
-                column - 32,
+                input.x,
+                input.y,
+                input.width - 220,
                 22,
             );
             move_control(
                 hwnd,
                 ADV_PREVIEW_START,
-                right_x + 16,
-                body_y + 62,
-                column - 32,
-                200,
+                input.x + input.width - 210,
+                input.y - 2,
+                210,
+                180,
             );
+            input.y += 36;
             move_control(
                 hwnd,
                 ADV_TRIGGER_SIDE + 1000,
-                right_x + 16,
-                body_y + 166,
-                column - 32,
+                input.x,
+                input.y,
+                input.width - 220,
                 22,
             );
             move_control(
                 hwnd,
                 ADV_TRIGGER_SIDE,
-                right_x + 16,
-                body_y + 190,
-                column - 32,
-                200,
+                input.x + input.width - 210,
+                input.y - 2,
+                210,
+                160,
             );
-            for (id, y) in [
-                (ADV_CYCLE_RESTART, 292),
-                (ADV_DOUBLE_TAP, 322),
-                (ADV_MIDDLE_CLICK, 352),
-                (ADV_MIDDLE_DELAY, 382),
+            input.y += 36;
+            for id in [
+                ADV_CYCLE_RESTART,
+                ADV_DOUBLE_TAP,
+                ADV_MIDDLE_CLICK,
+                ADV_MIDDLE_DELAY,
             ] {
-                move_control(hwnd, id, right_x + 16, body_y + y, column - 28, 26);
+                input.toggle(id);
             }
-            layout_numeric(
-                hwnd,
-                ADV_TRIGGER_TIMEOUT,
-                right_x + 16,
-                body_y + 412,
-                column - 32,
-            );
-            for (id, y) in [
-                (ADV_HIDE_NO_SELECTION, 460),
-                (ADV_HIDE_TRAY, 490),
-                (ADV_DEV_RELEASES, 520),
-            ] {
-                move_control(hwnd, id, right_x + 16, body_y + y, column - 28, 26);
+            input.number(ADV_TRIGGER_TIMEOUT);
+            for id in [ADV_HIDE_NO_SELECTION, ADV_HIDE_TRAY, ADV_DEV_RELEASES] {
+                input.toggle(id);
             }
+            column.end().max(input.end())
         }
         7 => {
-            move_control(hwnd, 1760, x, body_y, body_width, 22);
-            move_control(hwnd, 1761, x + 16, body_y + 38, body_width - 32, 24);
-            move_control(hwnd, 1762, x + 16, body_y + 72, body_width - 32, 42);
-            move_control(hwnd, ABOUT_UPDATE, x + 16, body_y + 138, 148, 30);
+            column.heading(1760);
+            column.line(1761, 24);
+            move_control(hwnd, ABOUT_UPDATE, column.x, column.y, 168, 40);
             move_control(
                 hwnd,
                 ABOUT_STATUS,
-                x + 178,
-                body_y + 140,
-                body_width - 198,
-                30,
+                column.x + 180,
+                column.y + 8,
+                column.width - 180,
+                24,
             );
-            move_control(hwnd, 1763, x + 16, body_y + 190, body_width - 32, 48);
+            column.y += 56;
+            column.line(1762, 20);
+            column.end()
         }
-        _ => {}
+        _ => column.end(),
+    };
+    let before = STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map_or(0, |state| state.scroll_offset)
+    });
+    update_scrollbar(hwnd, bottom, height);
+    let after = STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map_or(0, |state| state.scroll_offset)
+    });
+    if after != before {
+        layout_page(hwnd, page);
+        return;
     }
-    // Page controls are created after the footer. Raise the shell so group frames and
-    // combo drop-down rectangles cannot cover footer borders.
     raise_shell(hwnd);
-    // Clipped child regions move during scrolling. Erase the uncovered parent areas after all
-    // controls have been positioned so stale control backgrounds cannot remain as gray bands.
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
 }
 
 fn layout_numeric(hwnd: HWND, id: i32, x: i32, y: i32, width: i32) {
-    move_control(hwnd, id + 1000, x, y, width - 94, 20);
-    move_control(hwnd, id, x + width - 88, y - 2, 78, 24);
-    move_control(hwnd, field_error_id(id), x, y + 25, width, 16);
+    let field = 96.min(width / 3);
+    move_control(hwnd, id + 1000, x, y + 4, width - field - 16, 22);
+    move_control(hwnd, id, x + width - field, y, field, 28);
+    move_control(hwnd, field_error_id(id), x, y + 30, width - field - 16, 14);
 }
 
 fn update_caption(hwnd: HWND, page: usize) {
     let version = env!("CARGO_PKG_VERSION");
     let descriptions = [
-        "Placement, startup, and the trigger.",
-        "Ring shape, accent, and the action for each direction.",
-        "The plate that shows where the window will land.",
-        "Shortcuts that cycle through actions.",
-        "Layouts as fractions of the monitor.",
-        "Applications Orbit should ignore.",
-        "Padding, motion, and trigger details.",
-        "Version and updates.",
+        "How windows move, and how Orbit starts.",
+        "The ring, its color, and each direction.",
+        "The plate that shows where a window will land.",
+        "Keys that run one action or a cycle.",
+        "Saved frames, as fractions of the screen.",
+        "Programs Orbit leaves alone.",
+        "Edges, motion, and extra triggers.",
+        "This copy of Orbit.",
     ];
     if let Some(title) = PAGE_NAMES.get(page) {
         set_control_text(hwnd, PAGE_TITLE, title);
     }
     if page == 7 {
-        set_control_text(
-            hwnd,
-            PAGE_DESCRIPTION,
-            &format!("Orbit version {version} and update controls."),
-        );
+        set_control_text(hwnd, PAGE_DESCRIPTION, &format!("Orbit {version}."));
     } else if let Some(description) = descriptions.get(page) {
-        let _ = description;
-        set_control_text(hwnd, PAGE_DESCRIPTION, "");
+        set_control_text(hwnd, PAGE_DESCRIPTION, description);
     }
 }
 
@@ -3564,20 +3542,7 @@ fn retreat_focus_before_hide(parent: HWND, control: HWND) {
 fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
     if let Ok(control) = unsafe { GetDlgItem(Some(hwnd), id) } {
         let dpi = dpi_for_window(hwnd);
-        let page_child = id >= PAGE_ID_START;
-        let scrolls_with_page = page_child
-            && !matches!(
-                id,
-                1700 | 1701
-                    | 1710
-                    | 1720
-                    | 1730
-                    | 1740
-                    | 1750
-                    | 1760
-                    | ADV_GROUP_PLACEMENT
-                    | ADV_GROUP_INPUT
-            );
+        let scrolls_with_page = id >= PAGE_ID_START;
         let offset = if scrolls_with_page {
             STATE.with(|state| {
                 state
@@ -3617,11 +3582,10 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32) {
                 )
             };
         }
-        if page_child {
+        if id >= PAGE_ID_START {
             let (_, client_height) = client_size_logical(hwnd);
-            let clip_bottom = client_height - 112;
-            // Leave the group caption band fixed. Scrolling fields start below it.
-            let clip_top = if is_group_id(id) { 108 } else { 126 };
+            let clip_bottom = client_height - 80;
+            let clip_top = 88;
             let combo = class_is(control, "ComboBox");
             if combo {
                 // A region on a combo cuts the hidden drop-down list into the selection
@@ -3678,6 +3642,7 @@ fn is_group_id(id: i32) -> bool {
             | 1730
             | 1740
             | 1750
+            | 1711
             | 1760
             | ADV_GROUP_PLACEMENT
             | ADV_GROUP_INPUT
