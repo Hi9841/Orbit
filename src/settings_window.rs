@@ -678,8 +678,9 @@ fn control_brush(message: u32, control: HWND, hdc: HDC) -> HBRUSH {
                 (brushes.input, COLOR_INPUT, COLOR_TEXT)
             }
         } else if id == SIDEBAR_LABEL || id == BRAND {
-            let text = if id == BRAND { COLOR_TEXT } else { COLOR_MUTED };
-            (brushes.sidebar, COLOR_SIDEBAR, text)
+            (brushes.sidebar, COLOR_SIDEBAR, COLOR_MUTED)
+        } else if is_group_id(id) {
+            (brushes.canvas, COLOR_CANVAS, COLOR_MUTED)
         } else if matches!(id, PAGE_TITLE | PAGE_DESCRIPTION | STATUS) {
             let text = if id == PAGE_TITLE {
                 COLOR_TEXT
@@ -725,22 +726,13 @@ fn draw_sidebar_item(item: &DRAWITEMSTRUCT) {
         let selected = item.itemState.0 & ODS_SELECTED.0 != 0;
         unsafe {
             FillRect(item.hDC, &item.rcItem, brushes.sidebar);
-            if selected {
-                let selection = RECT {
-                    left: item.rcItem.left + 8,
-                    top: item.rcItem.top + 6,
-                    right: item.rcItem.right - 8,
-                    bottom: item.rcItem.bottom - 6,
-                };
-                FillRect(item.hDC, &selection, brushes.selection);
-            }
             let _ = SetBkMode(item.hDC, windows::Win32::Graphics::Gdi::TRANSPARENT);
             let _ = SetTextColor(item.hDC, if selected { COLOR_TEXT } else { COLOR_MUTED });
             let mut label = to_wide(title);
             let label_len = label.len() - 1;
             let mut label_rect = RECT {
-                left: item.rcItem.left + 22,
-                right: item.rcItem.right - 12,
+                left: item.rcItem.left + 16,
+                right: item.rcItem.right - 16,
                 ..item.rcItem
             };
             DrawTextW(
@@ -764,9 +756,16 @@ fn draw_footer_button(item: &DRAWITEMSTRUCT) {
         COLOR_MUTED
     };
     unsafe {
+        let mut bounds = item.rcItem;
+        if pressed {
+            bounds.left += 1;
+            bounds.top += 1;
+            bounds.right -= 1;
+            bounds.bottom -= 1;
+        }
         if save {
-            let brush = CreateSolidBrush(if pressed { COLOR_TEXT } else { COLOR_ACCENT });
-            let _ = FillRect(item.hDC, &item.rcItem, brush);
+            let brush = CreateSolidBrush(COLOR_ACCENT);
+            let _ = FillRect(item.hDC, &bounds, brush);
             let _ = DeleteObject(HGDIOBJ(brush.0));
         } else {
             BRUSHES.with(|slot| {
@@ -780,10 +779,7 @@ fn draw_footer_button(item: &DRAWITEMSTRUCT) {
         let mut text = [0u16; 64];
         let len = GetWindowTextW(item.hwndItem, &mut text);
         if len > 0 {
-            let mut label_rect = item.rcItem;
-            if pressed {
-                label_rect.top += 1;
-            }
+            let mut label_rect = bounds;
             DrawTextW(
                 item.hDC,
                 &mut text[..len as usize],
@@ -1007,7 +1003,7 @@ fn set_scroll_offset(hwnd: HWND, requested: i32) {
 }
 
 fn create_shell(hwnd: HWND) -> Result<(), String> {
-    create_text(hwnd, BRAND, &format!("Orbit {}", env!("CARGO_PKG_VERSION")))?;
+    create_text(hwnd, BRAND, "Orbit")?;
     create_text(hwnd, SIDEBAR_LABEL, "")?;
     child(
         hwnd,
@@ -1065,7 +1061,7 @@ fn fill_sidebar(hwnd: HWND) {
 
 fn set_sidebar_item_height(hwnd: HWND) {
     if let Ok(sidebar) = unsafe { GetDlgItem(Some(hwnd), SIDEBAR) } {
-        let height = px(48, dpi_for_window(hwnd));
+        let height = px(40, dpi_for_window(hwnd));
         unsafe {
             SendMessageW(
                 sidebar,
@@ -1117,7 +1113,7 @@ fn child(
         };
         let _ = SetWindowTheme(control, theme, PCWSTR::null());
         let fonts = FONTS.with(Cell::get);
-        let font = if id == PAGE_TITLE || id == BRAND {
+        let font = if id == PAGE_TITLE {
             fonts.map_or(HFONT::default(), |fonts| fonts.title)
         } else {
             fonts.map_or(HFONT::default(), |fonts| fonts.body)
@@ -2450,7 +2446,7 @@ pub fn set_update_status(text: &str) {
 
 fn layout_window(hwnd: HWND) {
     let (width, height) = client_size_logical(hwnd);
-    move_control(hwnd, BRAND, 28, 28, 190, 36);
+    move_control(hwnd, BRAND, 28, 32, 160, 22);
     move_control(hwnd, SIDEBAR_LABEL, 0, -40, 1, 1);
     move_control(hwnd, SIDEBAR, 12, 84, 224, (height - 168).max(160));
     raise_shell(hwnd);
@@ -2474,15 +2470,8 @@ fn layout_page(hwnd: HWND, page: usize) {
     match page {
         0 => {
             let column = (body_width - gap) / 2;
-            move_control(hwnd, 1700, x, body_y, column, (height - 232).max(1));
-            move_control(
-                hwnd,
-                1701,
-                x + column + gap,
-                body_y,
-                column,
-                (height - 232).max(1),
-            );
+            move_control(hwnd, 1700, x, body_y, column, 22);
+            move_control(hwnd, 1701, x + column + gap, body_y, column, 22);
             let row = |n: i32| body_y + 36 + n * 48;
             for (id, n) in [
                 (BEHAVIOR_PADDING, 0),
@@ -2559,7 +2548,7 @@ fn layout_page(hwnd: HWND, page: usize) {
         }
         1 => {
             let half = (body_width - gap) / 2;
-            move_control(hwnd, 1710, x, body_y, body_width, (height - 232).max(1));
+            move_control(hwnd, 1710, x, body_y, body_width, 22);
             move_control(
                 hwnd,
                 RADIAL_VISIBLE,
@@ -2664,7 +2653,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             );
         }
         2 => {
-            move_control(hwnd, 1720, x, body_y, body_width, (height - 232).max(1));
+            move_control(hwnd, 1720, x, body_y, body_width, 22);
             move_control(
                 hwnd,
                 PREVIEW_VISIBLE,
@@ -2692,7 +2681,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             move_control(hwnd, 1721, x + 16, body_y + 318, body_width - 32, 44);
         }
         3 => {
-            move_control(hwnd, 1730, x, body_y, body_width, (height - 232).max(1));
+            move_control(hwnd, 1730, x, body_y, body_width, 22);
             move_control(hwnd, 1731, x + 16, body_y + 34, body_width - 32, 24);
             let detail_x = x + 304;
             let detail_width = body_width - 320;
@@ -2782,7 +2771,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             move_control(hwnd, SHORTCUT_APPLY, detail_x, body_y + 410, 148, 28);
         }
         4 => {
-            move_control(hwnd, 1740, x, body_y, body_width, (height - 232).max(1));
+            move_control(hwnd, 1740, x, body_y, body_width, 22);
             move_control(hwnd, 1741, x + 16, body_y + 34, body_width - 32, 24);
             move_control(hwnd, FRAME_LIST, x + 16, body_y + 70, 264, 300);
             move_control(hwnd, FRAME_NEW, x + 16, body_y + 376, 104, 28);
@@ -2815,7 +2804,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             move_control(hwnd, FRAME_APPLY, form_x, body_y + 300, 148, 30);
         }
         5 => {
-            move_control(hwnd, 1750, x, body_y, body_width, (height - 232).max(1));
+            move_control(hwnd, 1750, x, body_y, body_width, 22);
             move_control(hwnd, 1751, x + 16, body_y + 34, body_width - 32, 24);
             move_control(hwnd, 1752, x + 16, body_y + 60, body_width - 32, 24);
             move_control(
@@ -2830,22 +2819,8 @@ fn layout_page(hwnd: HWND, page: usize) {
         6 => {
             let column = (body_width - gap) / 2;
             let right_x = x + column + gap;
-            move_control(
-                hwnd,
-                ADV_GROUP_PLACEMENT,
-                x,
-                body_y,
-                column,
-                (height - 232).max(1),
-            );
-            move_control(
-                hwnd,
-                ADV_GROUP_INPUT,
-                right_x,
-                body_y,
-                column,
-                (height - 232).max(1),
-            );
+            move_control(hwnd, ADV_GROUP_PLACEMENT, x, body_y, column, 22);
+            move_control(hwnd, ADV_GROUP_INPUT, right_x, body_y, column, 22);
             layout_numeric(
                 hwnd,
                 ADV_MIN_SCREEN_INCHES,
@@ -2942,7 +2917,7 @@ fn layout_page(hwnd: HWND, page: usize) {
             }
         }
         7 => {
-            move_control(hwnd, 1760, x, body_y, body_width, (height - 232).max(1));
+            move_control(hwnd, 1760, x, body_y, body_width, 22);
             move_control(hwnd, 1761, x + 16, body_y + 38, body_width - 32, 24);
             move_control(hwnd, 1762, x + 16, body_y + 72, body_width - 32, 42);
             move_control(hwnd, ABOUT_UPDATE, x + 16, body_y + 138, 148, 30);

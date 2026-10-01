@@ -2386,7 +2386,12 @@ fn bind_open_radial(host: HWND) {
 }
 
 pub fn run() -> Result<(), String> {
-    let settings = Settings::load()?;
+    let mut settings = Settings::load()?;
+    // Keep the sign-in registration pointed at this executable. A missing or
+    // stale Run value is why Orbit stayed closed after a restart.
+    if let Err(error) = crate::login::ensure_sign_in_launch(&mut settings) {
+        eprintln!("Orbit sign-in launch: {error}");
+    }
     let instance_mutex =
         unsafe { CreateMutexW(None, false, w!("Local\\Orbit.WindowManager.6C96F66A")) }
             .map_err(|error| format!("cannot create Orbit instance mutex: {error}"))?;

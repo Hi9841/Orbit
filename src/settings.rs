@@ -79,6 +79,10 @@ pub struct Settings {
     pub radial_menu_visible: bool,
     pub preview_visible: bool,
     pub launch_at_login: bool,
+    /// False until this install has applied the sign-in default once.
+    /// Older files omitted the field, so the first load can turn launch on
+    /// without treating an explicit later choice as unset.
+    pub launch_at_login_set: bool,
     pub snap_on_drag: bool,
     pub excluded_processes: Vec<String>,
     pub trigger: Hotkey,
@@ -139,7 +143,8 @@ impl Default for Settings {
             padding: 0,
             radial_menu_visible: true,
             preview_visible: true,
-            launch_at_login: false,
+            launch_at_login: true,
+            launch_at_login_set: false,
             snap_on_drag: false,
             excluded_processes: Vec::new(),
             trigger: Hotkey::default(),

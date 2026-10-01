@@ -40,6 +40,7 @@ Root: HKCU; Subkey: "Software\Classes\orbit"; ValueType: string; ValueData: "URL
 Root: HKCU; Subkey: "Software\Classes\orbit"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\orbit\DefaultIcon"; ValueType: string; ValueData: "{app}\orbit.exe,0"
 Root: HKCU; Subkey: "Software\Classes\orbit\shell\open\command"; ValueType: string; ValueData: """{app}\orbit.exe"" ""%1"""
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Orbit"; ValueData: """{app}\orbit.exe"" --resident"; Flags: uninsdeletevalue
 
 [Icons]
 Name: "{group}\Orbit"; Filename: "{app}\orbit.exe"

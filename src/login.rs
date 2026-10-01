@@ -42,3 +42,14 @@ pub fn set_enabled(enabled: bool) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Register or remove the sign-in entry so it matches settings, and turn it on
+/// once for installs that still have the old off-by-default value.
+pub fn ensure_sign_in_launch(settings: &mut orbit::settings::Settings) -> Result<(), String> {
+    if !settings.launch_at_login_set {
+        settings.launch_at_login = true;
+        settings.launch_at_login_set = true;
+        let _ = settings.save();
+    }
+    set_enabled(settings.launch_at_login)
+}
